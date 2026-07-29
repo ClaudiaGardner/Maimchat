@@ -5,12 +5,15 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
@@ -47,6 +50,7 @@ class RealtimeConversationClient(
         private val onError: (String) -> Unit
 ) {
     private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(AudioManager::class.java)
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
     private val client =
@@ -81,6 +85,9 @@ class RealtimeConversationClient(
     @Volatile private var noiseSuppressor: NoiseSuppressor? = null
     @Volatile private var session: RealtimeSessionPayload? = null
     @Volatile private var intentionalClose = false
+    private var audioRouteClaimed = false
+    private var previousAudioMode = AudioManager.MODE_NORMAL
+    private var previousSpeakerphoneOn = false
 
     fun start(payload: RealtimeSessionPayload): Result<Unit> =
             runCatching {
@@ -137,6 +144,7 @@ class RealtimeConversationClient(
 
     fun setOutputEnabled(enabled: Boolean) {
         outputEnabled.set(enabled)
+        updateAudioRoute()
         if (!enabled) {
             clearOutput()
             onSpeakingChanged(false)
@@ -305,6 +313,7 @@ class RealtimeConversationClient(
     private fun startMedia(): Result<Unit> =
             runCatching {
                 if (!active.get() || audioRecord != null) return@runCatching
+                claimAudioRoute()
                 val inputMin =
                         AudioRecord.getMinBufferSize(
                                 INPUT_SAMPLE_RATE,
@@ -466,6 +475,60 @@ class RealtimeConversationClient(
         echoCanceler = null
         noiseSuppressor = null
         playbackLoopStarted.set(false)
+        releaseAudioRoute()
+    }
+
+    private fun claimAudioRoute() {
+        synchronized(lifecycleLock) {
+            if (!audioRouteClaimed) {
+                previousAudioMode = audioManager.mode
+                @Suppress("DEPRECATION")
+                previousSpeakerphoneOn = audioManager.isSpeakerphoneOn
+                audioRouteClaimed = true
+            }
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            updateAudioRouteLocked()
+        }
+    }
+
+    private fun updateAudioRoute() {
+        synchronized(lifecycleLock) {
+            if (!audioRouteClaimed) return
+            updateAudioRouteLocked()
+        }
+    }
+
+    private fun updateAudioRouteLocked() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (outputEnabled.get()) {
+                val speaker =
+                        audioManager.availableCommunicationDevices.firstOrNull {
+                            it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                        }
+                if (speaker != null) {
+                    audioManager.setCommunicationDevice(speaker)
+                }
+            } else {
+                audioManager.clearCommunicationDevice()
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = outputEnabled.get()
+        }
+    }
+
+    private fun releaseAudioRoute() {
+        synchronized(lifecycleLock) {
+            if (!audioRouteClaimed) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = previousSpeakerphoneOn
+            }
+            audioManager.mode = previousAudioMode
+            audioRouteClaimed = false
+        }
     }
 
     private fun JsonObject.string(name: String): String {
