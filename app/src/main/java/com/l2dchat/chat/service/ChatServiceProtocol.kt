@@ -12,6 +12,8 @@ object ChatServiceProtocol {
     const val MSG_CLEAR_MESSAGES = 8
     const val MSG_SET_ACTIVE_MODEL = 9
     const val MSG_CLEAR_MESSAGES_EPHEMERAL = 10
+    const val MSG_SEND_MEDIA = 11
+    const val MSG_SET_SPEAKER_ENABLED = 12
 
     // Service -> Client events
     const val MSG_EVENT_CONNECTION_STATE = 101
@@ -29,6 +31,9 @@ object ChatServiceProtocol {
     const val EXTRA_RECEIVER_ID = "extra_receiver_id"
     const val EXTRA_RECEIVER_NICKNAME = "extra_receiver_nickname"
     const val EXTRA_MODEL_NAME = "extra_model_name"
+    const val EXTRA_MEDIA_TYPE = "extra_media_type"
+    const val EXTRA_MEDIA_FILE_PATH = "extra_media_file_path"
+    const val EXTRA_SPEAKER_ENABLED = "extra_speaker_enabled"
 
     // Event extras
     const val EXTRA_CONNECTION_STATE = "extra_connection_state"

@@ -1,10 +1,12 @@
 package com.l2dchat.ui.screens
 
+import android.Manifest
 import android.app.Activity
 import android.app.WallpaperManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -22,12 +24,17 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
@@ -47,6 +54,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.chat.service.ChatServiceClient
 import com.l2dchat.live2d.ImprovedLive2DRenderer
@@ -55,6 +63,8 @@ import com.l2dchat.live2d.Live2DModelManager
 import com.l2dchat.live2d.Live2DViewTransform
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
+import com.l2dchat.media.DeviceAudioRecorder
+import com.l2dchat.ui.components.CameraCaptureDialog
 import com.l2dchat.preferences.ChatPreferenceKeys
 import com.l2dchat.ui.components.LogViewerDialog
 import com.l2dchat.wallpaper.Live2DWallpaperService
@@ -104,11 +114,13 @@ fun ChatWithModelScreen(
     val reservedBottomHeight =
             if (isLandscape) LandscapeReservedBottomHeight else ReservedBottomHeight
     val scope = rememberCoroutineScope()
+    val audioRecorder = remember(context) { DeviceAudioRecorder(context.applicationContext) }
 
     val connectionState by chatManager.connectionState.collectAsState()
     val messages by chatManager.messages.collectAsState()
     val standardMessages by chatManager.standardMessages.collectAsState()
     val currentUserNickname by chatManager.userNickname.collectAsState()
+    val speakerEnabled by chatManager.speakerEnabled.collectAsState()
     val prefs =
             remember(context) {
                 context.getSharedPreferences(
@@ -147,6 +159,41 @@ fun ChatWithModelScreen(
     var chatInputHeightPx by remember { mutableStateOf(0) }
     val connectionErrorBanners = remember { mutableStateListOf<ConnectionErrorBanner>() }
     var suppressMissingUrlWarning by rememberSaveable { mutableStateOf(true) }
+    var showCameraCapture by remember { mutableStateOf(false) }
+    var isRecording by remember { mutableStateOf(false) }
+
+    val beginMicrophoneRecording: () -> Unit = {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { audioRecorder.start() }
+            result.onSuccess { isRecording = true }
+                    .onFailure { error ->
+                        Toast.makeText(
+                                        context,
+                                        "无法开始录音：${error.message ?: "未知错误"}",
+                                        Toast.LENGTH_LONG
+                                )
+                                .show()
+                    }
+        }
+    }
+    val microphonePermissionLauncher =
+            rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+                    granted ->
+                if (granted) {
+                    beginMicrophoneRecording()
+                } else {
+                    Toast.makeText(context, "需要麦克风权限才能发送语音", Toast.LENGTH_LONG).show()
+                }
+            }
+    val cameraPermissionLauncher =
+            rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+                    granted ->
+                if (granted) {
+                    showCameraCapture = true
+                } else {
+                    Toast.makeText(context, "需要相机权限才能拍照", Toast.LENGTH_LONG).show()
+                }
+            }
 
     var isLoadingDefaultModel by remember { mutableStateOf(selectedModel == null) }
     var currentModel by remember(modelKey) { mutableStateOf(selectedModel) }
@@ -280,6 +327,7 @@ fun ChatWithModelScreen(
     }
 
     DisposableEffect(Unit) { onDispose { backgroundBitmap?.takeIf { !it.isRecycled }?.recycle() } }
+    DisposableEffect(audioRecorder) { onDispose { audioRecorder.cancel() } }
 
     LaunchedEffect(currentModel) {
         val folder = currentModel?.folderPath
@@ -627,6 +675,67 @@ fun ChatWithModelScreen(
                                 }
                             }
                         },
+                        onCamera = {
+                            if (!chatManager.hasUserNickname()) {
+                                showConnectionDialog = true
+                            } else if (ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.CAMERA
+                                    ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                showCameraCapture = true
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
+                        },
+                        isRecording = isRecording,
+                        onMicrophone = {
+                            if (!chatManager.hasUserNickname()) {
+                                showConnectionDialog = true
+                            } else if (isRecording) {
+                                isRecording = false
+                                scope.launch {
+                                    val result =
+                                            withContext(Dispatchers.IO) { audioRecorder.stop() }
+                                    result.onSuccess { file ->
+                                        chatManager.sendVoice(file)
+                                        Toast.makeText(
+                                                        context,
+                                                        "语音已发送",
+                                                        Toast.LENGTH_SHORT
+                                                )
+                                                .show()
+                                    }.onFailure { error ->
+                                        Toast.makeText(
+                                                        context,
+                                                        "录音失败：${error.message ?: "未知错误"}",
+                                                        Toast.LENGTH_LONG
+                                                )
+                                                .show()
+                                    }
+                                }
+                            } else if (ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                beginMicrophoneRecording()
+                            } else {
+                                microphonePermissionLauncher.launch(
+                                        Manifest.permission.RECORD_AUDIO
+                                )
+                            }
+                        },
+                        speakerEnabled = speakerEnabled,
+                        onSpeakerToggle = {
+                            chatManager.setSpeakerEnabled(!speakerEnabled)
+                            Toast.makeText(
+                                            context,
+                                            if (speakerEnabled) "扬声器已关闭" else "扬声器已开启",
+                                            Toast.LENGTH_SHORT
+                                    )
+                                    .show()
+                        },
                         modifier =
                                 Modifier.align(Alignment.BottomCenter).onSizeChanged { coords ->
                                     val newHeight = coords.height
@@ -692,6 +801,19 @@ fun ChatWithModelScreen(
                         }
                     },
                     onDismiss = { showConnectionDialog = false }
+            )
+        }
+        if (showCameraCapture) {
+            CameraCaptureDialog(
+                    onCaptured = { file ->
+                        showCameraCapture = false
+                        chatManager.sendImage(file)
+                        Toast.makeText(context, "照片已发送", Toast.LENGTH_SHORT).show()
+                    },
+                    onError = { error ->
+                        Toast.makeText(context, "拍照失败：$error", Toast.LENGTH_LONG).show()
+                    },
+                    onDismiss = { showCameraCapture = false }
             )
         }
         if (showLogViewer) {
@@ -821,6 +943,11 @@ private fun ChatInputBar(
         onInputChange: (String) -> Unit,
         enabled: Boolean,
         onSend: () -> Unit,
+        onCamera: () -> Unit,
+        isRecording: Boolean,
+        onMicrophone: () -> Unit,
+        speakerEnabled: Boolean,
+        onSpeakerToggle: () -> Unit,
         modifier: Modifier = Modifier
 ) {
     Surface(
@@ -833,11 +960,44 @@ private fun ChatInputBar(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.Bottom
         ) {
+            IconButton(
+                    onClick = onCamera,
+                    enabled = enabled,
+                    modifier = Modifier.size(40.dp)
+            ) {
+                Icon(Icons.Default.CameraAlt, contentDescription = "打开摄像头")
+            }
+            IconButton(
+                    onClick = onMicrophone,
+                    enabled = enabled,
+                    modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                        if (isRecording) Icons.Default.StopCircle else Icons.Default.Mic,
+                        contentDescription = if (isRecording) "停止并发送录音" else "开始录音",
+                        tint =
+                                if (isRecording) MaterialTheme.colorScheme.error
+                                else LocalContentColor.current
+                )
+            }
+            IconButton(onClick = onSpeakerToggle, modifier = Modifier.size(40.dp)) {
+                Icon(
+                        if (speakerEnabled) {
+                            Icons.AutoMirrored.Filled.VolumeUp
+                        } else {
+                            Icons.AutoMirrored.Filled.VolumeOff
+                        },
+                        contentDescription = if (speakerEnabled) "关闭扬声器" else "开启扬声器"
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
             OutlinedTextField(
                     value = inputText,
                     onValueChange = onInputChange,
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("输入消息...") },
+                    placeholder = {
+                        Text(if (isRecording) "录音中，再点麦克风发送…" else "输入消息…")
+                    },
                     maxLines = 4,
                     enabled = enabled
             )

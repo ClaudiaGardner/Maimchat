@@ -16,6 +16,7 @@ build/
 !build/published-apks/
 !build/published-apks/**
 .gradle/
+.kotlin/
 captures/
 
 # Local configuration files (important to ignore)

@@ -29,6 +29,7 @@ import okhttp3.WebSocketListener
 class ChatWebSocketManager {
     companion object {
         private const val DEFAULT_PLATFORM = ChatPreferenceKeys.DEFAULT_PLATFORM
+        private const val MAX_LOG_MESSAGE_CHARS = 512
     }
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
@@ -58,6 +59,7 @@ class ChatWebSocketManager {
     val standardMessages: StateFlow<List<MessageBase>> = _standardMessages.asStateFlow()
     private var lastServerMessageTime: Long = 0L
     private var onMotionTrigger: ((String, Int, Boolean) -> Unit)? = null
+    private var onVoiceReceived: ((String) -> Unit)? = null
     private var userId: String = generateUserId()
     private var userNickname: String? = null
     private var userCardName: String? = null
@@ -365,10 +367,10 @@ class ChatWebSocketManager {
     private fun handleIncomingMessage(text: String) {
         try {
             val standard = MessageBase.fromJsonString(text)
-            addStandardMessage(standard)
             when (val result = messageHandler.handleStandardMessage(standard)) {
                 is Live2DChatMessageHandler.ChatMessageResult.Success -> {
                     val fromUser = isSenderMe(standard.messageInfo.senderInfo)
+                    if (!fromUser) result.voiceData?.let { onVoiceReceived?.invoke(it) }
                     val srvTs = ((standard.messageInfo.time ?: 0.0) * 1000).toLong()
                     val isHistorical =
                             srvTs > 0 &&
@@ -391,11 +393,31 @@ class ChatWebSocketManager {
                                 lastServerMessageTime = srvTs
                     }
                 }
-                is Live2DChatMessageHandler.ChatMessageResult.VoiceProcessed -> {}
+                is Live2DChatMessageHandler.ChatMessageResult.VoiceProcessed -> {
+                    val fromUser = isSenderMe(standard.messageInfo.senderInfo)
+                    if (!fromUser) {
+                        onVoiceReceived?.invoke(result.voiceData)
+                    }
+                    addMessage(
+                            ChatMessage(
+                                    id =
+                                            standard.messageInfo.messageId
+                                                    ?: generateMessageId(),
+                                    content = "[语音]",
+                                    isFromUser = fromUser,
+                                    timestamp =
+                                            ((standard.messageInfo.time ?: 0.0) * 1000)
+                                                    .toLong()
+                                                    .takeIf { it > 0 }
+                                                    ?: System.currentTimeMillis()
+                            )
+                    )
+                }
                 is Live2DChatMessageHandler.ChatMessageResult.EmojiProcessed -> {}
                 is Live2DChatMessageHandler.ChatMessageResult.Error ->
                         logger.error("消息处理错误: ${result.message}")
             }
+            addStandardMessage(standard.redactedForHistory())
         } catch (e: Exception) {
             logger.error("处理消息失败", e)
         }
@@ -412,14 +434,47 @@ class ChatWebSocketManager {
         )
         sendStandardMessage(message)
     }
+
+    fun sendImageMessage(base64Jpeg: String) {
+        sendMediaMessage("image", base64Jpeg, "[照片]")
+    }
+
+    fun sendVoiceMessage(base64Wav: String) {
+        sendMediaMessage("voice", base64Wav, "[语音]")
+    }
+
+    private fun sendMediaMessage(type: String, payload: String, displayText: String) {
+        require(payload.isNotBlank()) { "媒体内容不能为空" }
+        val message =
+                buildStandardMessage(
+                        segments = listOf(Seg(type, payload)),
+                        messageType = type
+                )
+        addMessage(
+                ChatMessage(
+                        id = requireNotNull(message.messageInfo.messageId),
+                        content = displayText,
+                        isFromUser = true
+                )
+        )
+        sendStandardMessage(message)
+    }
+
     fun sendStandardMessage(message: MessageBase) {
         sendRawMessage(message.toJsonString())
     }
     private fun sendRawMessage(text: String) {
         if (_connectionState.value == ConnectionState.CONNECTED) {
             webSocket?.send(text)
+            val preview =
+                    sanitizeForLog(text.take(MAX_LOG_MESSAGE_CHARS)) +
+                            if (text.length > MAX_LOG_MESSAGE_CHARS) {
+                                "…(${text.length} chars)"
+                            } else {
+                                ""
+                            }
             logger.debug(
-                    "发送: ${sanitizeForLog(text)}",
+                    "发送: $preview",
                     throttleMs = 200L,
                     throttleKey = "send_preview"
             )
@@ -450,6 +505,9 @@ class ChatWebSocketManager {
     }
     fun setMotionTriggerCallback(callback: (String, Int, Boolean) -> Unit) {
         onMotionTrigger = callback
+    }
+    fun setVoiceReceivedCallback(callback: (String) -> Unit) {
+        onVoiceReceived = callback
     }
     fun getMessageEvents() = messageHandler.messageEvents
     private fun addMessage(message: ChatMessage) {
@@ -569,7 +627,10 @@ class ChatWebSocketManager {
                     arr?.forEach { el ->
                         if (el.isJsonPrimitive && el.asJsonPrimitive.isString) {
                             try {
-                                loadedStd.add(MessageBase.fromJsonString(el.asString))
+                                loadedStd.add(
+                                        MessageBase.fromJsonString(el.asString)
+                                                .redactedForHistory()
+                                )
                             } catch (_: Exception) {}
                         }
                     }

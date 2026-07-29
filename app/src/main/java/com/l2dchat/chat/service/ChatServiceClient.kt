@@ -14,6 +14,7 @@ import android.os.RemoteException
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -104,6 +105,8 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     private val _lastUrl =
             MutableStateFlow(prefs.getString(KEY_LAST_URL, null)?.takeIf { it.isNotBlank() })
     private val _activeModel = MutableStateFlow<String?>(null)
+    private val _speakerEnabled =
+            MutableStateFlow(prefs.getBoolean(KEY_SPEAKER_ENABLED, true))
     private var motionCallback: ((String, Int, Boolean) -> Unit)? = null
 
     val connectionState: StateFlow<ChatConnectionState> = _connectionState.asStateFlow()
@@ -116,6 +119,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     val userNickname: StateFlow<String?> = _userNickname.asStateFlow()
     val platform: StateFlow<String?> = _platform.asStateFlow()
     val activeModel: StateFlow<String?> = _activeModel.asStateFlow()
+    val speakerEnabled: StateFlow<Boolean> = _speakerEnabled.asStateFlow()
 
     fun bindService() {
         if (isBound) return
@@ -197,6 +201,36 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         sendCommand(
                 ChatServiceProtocol.MSG_SEND_MESSAGE,
                 Bundle().apply { putString(ChatServiceProtocol.EXTRA_MESSAGE_TEXT, trimmed) }
+        )
+    }
+
+    fun sendImage(file: File) {
+        sendMediaFile("image", file)
+    }
+
+    fun sendVoice(file: File) {
+        sendMediaFile("voice", file)
+    }
+
+    private fun sendMediaFile(type: String, file: File) {
+        require(type == "image" || type == "voice") { "Unsupported media type: $type" }
+        sendCommand(
+                ChatServiceProtocol.MSG_SEND_MEDIA,
+                Bundle().apply {
+                    putString(ChatServiceProtocol.EXTRA_MEDIA_TYPE, type)
+                    putString(ChatServiceProtocol.EXTRA_MEDIA_FILE_PATH, file.absolutePath)
+                }
+        )
+    }
+
+    fun setSpeakerEnabled(enabled: Boolean) {
+        _speakerEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_SPEAKER_ENABLED, enabled).apply()
+        sendCommand(
+                ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED,
+                Bundle().apply {
+                    putBoolean(ChatServiceProtocol.EXTRA_SPEAKER_ENABLED, enabled)
+                }
         )
     }
 
@@ -398,6 +432,8 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_REQUEST_SNAPSHOT -> "MSG_REQUEST_SNAPSHOT"
                 ChatServiceProtocol.MSG_CLEAR_MESSAGES -> "MSG_CLEAR_MESSAGES"
                 ChatServiceProtocol.MSG_CLEAR_MESSAGES_EPHEMERAL -> "MSG_CLEAR_MESSAGES_EPHEMERAL"
+                ChatServiceProtocol.MSG_SEND_MEDIA -> "MSG_SEND_MEDIA"
+                ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED -> "MSG_SET_SPEAKER_ENABLED"
                 ChatServiceProtocol.MSG_EVENT_CONNECTION_STATE -> "MSG_EVENT_CONNECTION_STATE"
                 ChatServiceProtocol.MSG_EVENT_NEW_MESSAGE -> "MSG_EVENT_NEW_MESSAGE"
                 ChatServiceProtocol.MSG_EVENT_SNAPSHOT -> "MSG_EVENT_SNAPSHOT"
@@ -433,5 +469,6 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         private const val KEY_NICKNAME = "nickname"
         private const val KEY_RECEIVER_ID = "receiver_user_id"
         private const val KEY_RECEIVER_NICKNAME = "receiver_user_nickname"
+        private const val KEY_SPEAKER_ENABLED = "speaker_enabled"
     }
 }

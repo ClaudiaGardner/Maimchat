@@ -16,7 +16,10 @@ import com.l2dchat.chat.ChatWebSocketManager.ConnectionState
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
+import com.l2dchat.media.DeviceAudioPlayer
+import com.l2dchat.media.DeviceMediaPayloadEncoder
 import com.l2dchat.wallpaper.WallpaperComm
+import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ChatConnectionService : Service() {
 
@@ -36,6 +40,8 @@ class ChatConnectionService : Service() {
     private val messenger = Messenger(incomingHandler)
 
     private lateinit var manager: ChatWebSocketManager
+    private lateinit var audioPlayer: DeviceAudioPlayer
+    private var speakerEnabled: Boolean = true
 
     private var lastKnownUrl: String? = null
     private var lastKnownPlatform: String? = null
@@ -47,6 +53,19 @@ class ChatConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         manager = ChatWebSocketManager()
+        audioPlayer = DeviceAudioPlayer(applicationContext) { error -> notifyError(error) }
+        speakerEnabled =
+                getSharedPreferences(CHAT_PREFS, MODE_PRIVATE)
+                        .getBoolean(KEY_SPEAKER_ENABLED, true)
+        manager.setVoiceReceivedCallback { payload ->
+            if (speakerEnabled) {
+                serviceScope.launch {
+                    audioPlayer.play(payload).onFailure { error ->
+                        notifyError("语音播放失败：${error.message ?: "未知错误"}")
+                    }
+                }
+            }
+        }
         manager.setActiveModel(applicationContext, restoreModelName())
         applyStoredConfiguration()
         startObservers()
@@ -65,6 +84,7 @@ class ChatConnectionService : Service() {
         logger.info("ChatConnectionService destroyed")
         serviceScope.cancel()
         clients.clear()
+        audioPlayer.stop()
         manager.disconnect()
     }
 
@@ -241,6 +261,55 @@ class ChatConnectionService : Service() {
         manager.sendUserMessage(text)
     }
 
+    private fun handleSendMedia(data: Bundle) {
+        val type = data.getString(ChatServiceProtocol.EXTRA_MEDIA_TYPE)
+        val path = data.getString(ChatServiceProtocol.EXTRA_MEDIA_FILE_PATH)
+        if (type !in setOf("image", "voice") || path.isNullOrBlank()) {
+            notifyError("媒体消息参数无效")
+            return
+        }
+        val mediaType = requireNotNull(type)
+        val mediaPath = path
+        if (manager.connectionState.value != ConnectionState.CONNECTED) {
+            ensureConnected()
+            File(mediaPath).delete()
+            notifyError("尚未连接，无法发送媒体")
+            return
+        }
+
+        serviceScope.launch {
+            val source = File(mediaPath)
+            try {
+                val payload =
+                        withContext(Dispatchers.IO) {
+                            DeviceMediaPayloadEncoder.encode(
+                                    applicationContext,
+                                    mediaType,
+                                    mediaPath
+                            )
+                        }
+                when (mediaType) {
+                    "image" -> manager.sendImageMessage(payload)
+                    "voice" -> manager.sendVoiceMessage(payload)
+                }
+            } catch (error: Throwable) {
+                notifyError("发送${if (mediaType == "image") "照片" else "语音"}失败：${error.message ?: "未知错误"}")
+            } finally {
+                withContext(Dispatchers.IO) { source.delete() }
+            }
+        }
+    }
+
+    private fun handleSpeakerEnabled(data: Bundle) {
+        speakerEnabled =
+                data.getBoolean(ChatServiceProtocol.EXTRA_SPEAKER_ENABLED, speakerEnabled)
+        getSharedPreferences(CHAT_PREFS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SPEAKER_ENABLED, speakerEnabled)
+                .apply()
+        if (!speakerEnabled) audioPlayer.stop()
+    }
+
     private fun handleConnectRequest(data: Bundle) {
         val url =
                 data.getString(ChatServiceProtocol.EXTRA_URL)?.takeIf { it.isNotBlank() }
@@ -375,6 +444,9 @@ class ChatConnectionService : Service() {
                 ChatServiceProtocol.MSG_CLEAR_MESSAGES_EPHEMERAL ->
                         service.handleClearMessages(false)
                 ChatServiceProtocol.MSG_SET_ACTIVE_MODEL -> service.handleSetActiveModel(msg.data)
+                ChatServiceProtocol.MSG_SEND_MEDIA -> service.handleSendMedia(msg.data)
+                ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED ->
+                        service.handleSpeakerEnabled(msg.data)
                 else -> super.handleMessage(msg)
             }
         }
@@ -388,5 +460,6 @@ class ChatConnectionService : Service() {
         private const val KEY_NICKNAME = "nickname"
         private const val KEY_RECEIVER_ID = "receiver_user_id"
         private const val KEY_RECEIVER_NICKNAME = "receiver_user_nickname"
+        private const val KEY_SPEAKER_ENABLED = "speaker_enabled"
     }
 }

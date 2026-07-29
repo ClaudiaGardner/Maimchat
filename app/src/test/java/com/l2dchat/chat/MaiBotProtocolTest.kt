@@ -140,4 +140,65 @@ class MaiBotProtocolTest {
                 (result as Live2DChatMessageHandler.ChatMessageResult.Success).message.content,
         )
     }
+
+    @Test
+    fun redactsBinaryMediaBeforePersistingHistory() {
+        val message =
+                MessageBase(
+                        messageInfo = BaseMessageInfo(messageId = "media-1"),
+                        messageSegment =
+                                Seg(
+                                        "seglist",
+                                        listOf(
+                                                Seg("text", "请看"),
+                                                Seg("image", "a".repeat(100_000)),
+                                                Seg("voice", "b".repeat(100_000))
+                                        )
+                                ),
+                        rawMessage = "c".repeat(10_000)
+                )
+
+        val redacted = message.redactedForHistory()
+        val segments = redacted.messageSegment.data as List<*>
+
+        assertEquals("请看", (segments[0] as Seg).data)
+        assertEquals("[media payload omitted]", (segments[1] as Seg).data)
+        assertEquals("[media payload omitted]", (segments[2] as Seg).data)
+        assertNull(redacted.rawMessage)
+        assertTrue(redacted.toJsonString().length < 2_000)
+    }
+
+    @Test
+    fun acceptsVoiceUrlAsPlayableVoice() {
+        val message =
+                MessageBase(
+                        messageInfo = BaseMessageInfo(messageId = "voice-url-1"),
+                        messageSegment = Seg("voiceurl", "https://example.test/reply.wav")
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.VoiceProcessed)
+        assertEquals(
+                "https://example.test/reply.wav",
+                (result as Live2DChatMessageHandler.ChatMessageResult.VoiceProcessed).voiceData
+        )
+    }
+
+    @Test
+    fun displaysIncomingImageAsPlaceholderInsteadOfBase64() {
+        val message =
+                MessageBase(
+                        messageInfo = BaseMessageInfo(messageId = "image-1"),
+                        messageSegment = Seg("image", "a".repeat(100_000))
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.Success)
+        assertEquals(
+                "[图片]",
+                (result as Live2DChatMessageHandler.ChatMessageResult.Success).message.content
+        )
+    }
 }

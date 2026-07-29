@@ -327,3 +327,33 @@ data class MessageBase(
         }
     }
 }
+
+/**
+ * Keeps message metadata and segment shape for history/UI correlation without persisting large
+ * binary payloads in SharedPreferences or sending them through Binder snapshots.
+ */
+fun MessageBase.redactedForHistory(): MessageBase =
+        copy(
+                messageSegment = messageSegment.redactedForHistory(),
+                rawMessage = rawMessage?.takeIf { it.length <= MAX_HISTORY_RAW_CHARS }
+        )
+
+private fun Seg.redactedForHistory(): Seg =
+        when (type) {
+            "seglist" -> {
+                @Suppress("UNCHECKED_CAST")
+                val children = data as List<Seg>
+                copy(data = children.map { it.redactedForHistory() })
+            }
+            "image", "emoji", "voice", "video", "file" -> copy(data = MEDIA_PAYLOAD_REDACTED)
+            else ->
+                    if (data.toString().length > MAX_HISTORY_SEGMENT_CHARS) {
+                        copy(data = data.toString().take(MAX_HISTORY_SEGMENT_CHARS))
+                    } else {
+                        this
+                    }
+        }
+
+private const val MEDIA_PAYLOAD_REDACTED = "[media payload omitted]"
+private const val MAX_HISTORY_SEGMENT_CHARS = 8_192
+private const val MAX_HISTORY_RAW_CHARS = 8_192

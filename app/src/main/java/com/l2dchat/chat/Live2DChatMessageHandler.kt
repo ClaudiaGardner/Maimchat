@@ -17,6 +17,7 @@ class Live2DChatMessageHandler {
             val parsed: ParsedMessageContent = parseMessageSegment(message.messageSegment)
             when {
                 parsed.hasVoice() -> handleVoiceMessage(message, parsed)
+                parsed.hasImage() -> handleImageMessage(message, parsed)
                 parsed.hasEmoji() -> handleEmojiMessage(message, parsed)
                 else -> handleTextMessage(message, parsed)
             }
@@ -36,8 +37,10 @@ class Live2DChatMessageHandler {
     private fun parseSegmentRecursive(segment: Seg, content: ParsedMessageContent): Unit {
         when (segment.type) {
             "text" -> content.addText(segment.data.toString())
+            "image" -> content.addImage(segment.data.toString())
             "emoji" -> content.addEmoji(segment.data.toString())
             "voice" -> content.addVoice(segment.data.toString())
+            "voiceurl" -> content.addVoice(segment.data.toString())
             // MaiBot prepends this control segment when replying to a message. It is routing
             // metadata, not user-visible text.
             "reply" -> Unit
@@ -88,7 +91,7 @@ class Live2DChatMessageHandler {
                             timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
                     )
             emit(MessageEvent.ChatReceived(chat))
-            return ChatMessageResult.Success(chat)
+            return ChatMessageResult.Success(chat, voiceData = voice)
         }
         return ChatMessageResult.VoiceProcessed(voice)
     }
@@ -110,6 +113,24 @@ class Live2DChatMessageHandler {
         emit(MessageEvent.ChatReceived(chat))
         return ChatMessageResult.Success(chat)
     }
+    private fun handleImageMessage(
+            message: MessageBase,
+            content: ParsedMessageContent
+    ): ChatMessageResult {
+        val image = content.imageData.firstOrNull()
+                ?: return ChatMessageResult.Error("图片数据为空")
+        emit(MessageEvent.ImageReceived(image))
+        val text = content.getText()
+        val chat =
+                ChatWebSocketManager.ChatMessage(
+                        id = message.messageInfo.messageId ?: genId(),
+                        content = if (text.isNotBlank()) text else "[图片]",
+                        isFromUser = false,
+                        timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
+                )
+        emit(MessageEvent.ChatReceived(chat))
+        return ChatMessageResult.Success(chat)
+    }
     private fun emit(event: MessageEvent) {
         _messageEvents.tryEmit(event)
     }
@@ -117,7 +138,10 @@ class Live2DChatMessageHandler {
             "msg_${System.currentTimeMillis()}_${(Math.random()*1000).toInt()}"
 
     sealed class ChatMessageResult {
-        data class Success(val message: ChatWebSocketManager.ChatMessage) : ChatMessageResult()
+        data class Success(
+                val message: ChatWebSocketManager.ChatMessage,
+                val voiceData: String? = null
+        ) : ChatMessageResult()
 
         data class VoiceProcessed(val voiceData: String) : ChatMessageResult()
 
@@ -132,16 +156,22 @@ class Live2DChatMessageHandler {
 
         data class EmojiReceived(val emojiData: String) : MessageEvent()
 
+        data class ImageReceived(val imageData: String) : MessageEvent()
+
         data class Error(val message: String, val exception: Throwable?) : MessageEvent()
     }
 }
 
 class ParsedMessageContent {
     val textData: MutableList<String> = mutableListOf()
+    val imageData: MutableList<String> = mutableListOf()
     val emojiData: MutableList<String> = mutableListOf()
     val voiceData: MutableList<String> = mutableListOf()
     fun addText(t: String): Unit {
         textData.add(t)
+    }
+    fun addImage(image: String): Unit {
+        imageData.add(image)
     }
     fun addEmoji(e: String): Unit {
         emojiData.add(e)
@@ -159,5 +189,6 @@ class ParsedMessageContent {
     }
     fun getText(): String = textData.joinToString(" ")
     fun hasVoice(): Boolean = voiceData.isNotEmpty()
+    fun hasImage(): Boolean = imageData.isNotEmpty()
     fun hasEmoji(): Boolean = emojiData.isNotEmpty()
 }
