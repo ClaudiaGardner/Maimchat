@@ -11,11 +11,11 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLSurface
 import android.opengl.GLSurfaceView
-import android.os.Build
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
 import android.view.MotionEvent
 import android.view.SurfaceHolder
+import androidx.core.content.ContextCompat
 import com.l2dchat.chat.service.ChatServiceClient.ChatMessageSnapshot
 import com.l2dchat.live2d.Live2DGestureDispatcher
 import com.l2dchat.logging.L2DLogger
@@ -325,11 +325,12 @@ class Live2DWallpaperService : WallpaperService() {
                         addAction(WallpaperComm.ACTION_REFRESH_BACKGROUND)
                         addAction(WallpaperComm.ACTION_REFRESH_MODEL)
                     }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                @Suppress("DEPRECATION") registerReceiver(receiver, filter)
-            }
+            ContextCompat.registerReceiver(
+                    this@Live2DWallpaperService,
+                    receiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+            )
             WallpaperChatCoordinator.addListener(bubbleListener)
             scope.launch {
                 try {

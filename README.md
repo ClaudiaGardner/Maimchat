@@ -1,4 +1,9 @@
-# L2DChat Android
+# Maimchat Android
+
+> MaiBot 0.6.8 的原生 Android 客户端正在 `dev` 分支进行。App 使用
+> `maim_message` 标准消息直连 MaiBot，不依赖 Unity 或独立 Adapter，并包含展台常亮、
+> 持续重连、Live2D 资源热更新和 APK OTA。部署说明见
+> [`ANDROID_DEPLOYMENT.md`](./ANDROID_DEPLOYMENT.md)。
 
 基于 Live2D Cubism SDK 与 Jetpack Compose 打造的移动端实时聊天示例。
 应用将聊天服务返回的数据与 2D 模型驱动进行耦合，提供模型选取、消息对话、多媒体段处理、动态壁纸、小组件转发等完整体验骨架，便于二次开发成个人助手或虚拟主播客户端。
@@ -87,11 +92,12 @@ androidproj/
   - 若使用 Debug 版 Core，请根据需要更换路径（例如 `Core/Debug/Live2DCubismCore.aar`）。
   - 请勿将 `.aar` 提交到仓库，`.gitignore` 已默认忽略。
 
-1. **准备模型与 Shader**
+1. **准备官方 Hiyori 示例模型**
 
-  - 将模型文件夹（含 `.model3.json`、`.moc3`、`textures/`、`motions/` 等）直接放入 `app/src/main/assets/`。
-  - 如需使用官方示例模型/Shader，请确认遵守 [Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html) 并复制到该目录。
-  - 仓库提供 `app/src/main/assets/README.md` 作为占位说明。
+  - 阅读 [Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html) 和 [Live2D Cubism Sample Data Terms](https://www.live2d.com/en/learn/sample/model-terms/)。
+  - 接受条款后运行 `.\prepare_live2d_sample.ps1 -AcceptLive2DTerms`，脚本会从本地 SDK 拷贝官方 Hiyori 示例。
+  - 官方原始素材不会进入 Git；完整版权说明见 [`LIVE2D_SAMPLE_NOTICE.md`](./LIVE2D_SAMPLE_NOTICE.md)。
+  - 自有模型仍可直接放入 `app/src/main/assets/`，应用会自动扫描。
 
 1. **验证资源是否就绪（可选）**
 
@@ -136,12 +142,13 @@ androidproj/
 
 ## 🧩 Live2D 资源与授权
 
-- 仓库不再附带任何 Live2D 官方 SDK、模型或 Shader；请使用者按上节步骤自行下载并确认许可。
+- 仓库不附带 Live2D 官方 SDK、模型原始文件或 Cubism Core；请按上节步骤从官方 SDK 准备 Hiyori。
 - 相关授权协议：
   - [Live2D Open Software License Agreement](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html)
   - [Live2D Proprietary Software License Agreement](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
   - [Live2D Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html)
 - 将模型文件夹直接置于 `app/src/main/assets/` 下，应用会自动扫描并在 UI 中列出可选模型。
+- 默认模型选择会优先使用官方 Hiyori 示例。
 - 若发布到公开仓库或商用产品，请再次核对是否需要签署 Cubism SDK Release License（年营收 ≥ 1000 万日元的主体必须签署）。
 
 ## 🤝 贡献指南

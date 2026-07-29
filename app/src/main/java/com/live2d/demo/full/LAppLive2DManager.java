@@ -14,6 +14,7 @@ import com.live2d.sdk.cubism.framework.motion.ACubismMotion;
 import com.live2d.sdk.cubism.framework.motion.IBeganMotionCallback;
 import com.live2d.sdk.cubism.framework.motion.IFinishedMotionCallback;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,6 +78,7 @@ public class LAppLive2DManager {
                     }
                 }
             }
+            registerHotModels(ctx);
             Collections.sort(modelDir);
         } catch (IOException ex) {
             throw new IllegalStateException(ex);
@@ -202,8 +204,8 @@ public class LAppLive2DManager {
 
         String modelDirName = modelDir.get(index);
 
-        String modelPath = ResourcePath.ROOT.getPath() + modelDirName + "/";
-        String modelJsonName = modelDirName + ".model3.json";
+        String modelPath = resolveModelPath(modelDirName);
+        String modelJsonName = resolveModelJsonName(modelDirName);
 
         releaseAllModel();
 
@@ -270,8 +272,8 @@ public class LAppLive2DManager {
                 modelDir.add(folderName);
             }
 
-            String modelPath = ResourcePath.ROOT.getPath() + folderName + "/";
-            String modelJsonName = folderName + ".model3.json";
+            String modelPath = resolveModelPath(folderName);
+            String modelJsonName = resolveModelJsonName(folderName);
 
             Log.d("LAppLive2DManager", "Resolved paths -> modelPath=" + modelPath + " json=" + modelJsonName);
             releaseAllModel();
@@ -351,6 +353,42 @@ public class LAppLive2DManager {
      */
     public List<String> getModelDirList() {
         return new ArrayList<>(modelDir);
+    }
+
+    private void registerHotModels(Context context) {
+        File root = new File(context.getFilesDir(), "live2d/models");
+        File[] directories = root.listFiles(File::isDirectory);
+        if (directories == null) {
+            return;
+        }
+        for (File directory : directories) {
+            File[] modelFiles = directory.listFiles(
+                    file -> file.isFile() && file.getName().endsWith(".model3.json"));
+            if (modelFiles != null && modelFiles.length > 0) {
+                modelDir.add(directory.getAbsolutePath());
+            }
+        }
+    }
+
+    private String resolveModelPath(String modelDirectory) {
+        File directory = new File(modelDirectory);
+        if (directory.isAbsolute()) {
+            return directory.getAbsolutePath() + File.separator;
+        }
+        return ResourcePath.ROOT.getPath() + modelDirectory + "/";
+    }
+
+    private String resolveModelJsonName(String modelDirectory) {
+        File directory = new File(modelDirectory);
+        if (directory.isAbsolute()) {
+            File[] modelFiles = directory.listFiles(
+                    file -> file.isFile() && file.getName().endsWith(".model3.json"));
+            if (modelFiles == null || modelFiles.length == 0) {
+                throw new IllegalStateException("No model3.json in " + modelDirectory);
+            }
+            return modelFiles[0].getName();
+        }
+        return modelDirectory + ".model3.json";
     }
 
     /**

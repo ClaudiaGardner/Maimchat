@@ -97,7 +97,10 @@ class WidgetInputActivity : ComponentActivity() {
                                                 trimmed,
                                                 fromUser = true
                                         )
-                                        val broadcast = Intent(WallpaperComm.ACTION_SEND_MESSAGE)
+                                        val broadcast =
+                                                Intent(WallpaperComm.ACTION_SEND_MESSAGE).setPackage(
+                                                        context.packageName
+                                                )
                                         broadcast.putExtra(
                                                 WallpaperComm.EXTRA_MESSAGE_TEXT,
                                                 trimmed

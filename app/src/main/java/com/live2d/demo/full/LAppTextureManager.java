@@ -8,7 +8,6 @@
 package com.live2d.demo.full;
 
 import android.content.Context;
-import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.opengl.GLES20;
@@ -47,15 +46,21 @@ public class LAppTextureManager {
         if (ctx == null) {
             throw new IllegalStateException("Context not initialized for texture loading.");
         }
-        AssetManager assetManager = ctx.getAssets();
         InputStream stream = null;
         try {
-            stream = assetManager.open(filePath);
+            stream = LAppPal.openFileStream(ctx, filePath);
         } catch (IOException e) {
-            e.printStackTrace();
+            throw new IllegalStateException("Unable to open texture " + filePath, e);
         }
         // decodeStreamは乗算済みアルファとして画像を読み込むようである
         Bitmap bitmap = BitmapFactory.decodeStream(stream);
+        try {
+            stream.close();
+        } catch (IOException ignored) {
+        }
+        if (bitmap == null) {
+            throw new IllegalStateException("Unable to decode texture " + filePath);
+        }
 
         // Texture0をアクティブにする
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);

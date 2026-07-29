@@ -41,6 +41,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
@@ -84,7 +85,8 @@ fun ChatWithModelScreen(
         chatManager: ChatServiceClient,
         modelKey: Int,
         onModelSelectionRequest: () -> Unit,
-        onModelChanged: (Live2DModelManager.ModelInfo?) -> Unit
+        onModelChanged: (Live2DModelManager.ModelInfo?) -> Unit,
+        onCheckForUpdates: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -113,8 +115,9 @@ fun ChatWithModelScreen(
             }
     var inputText by remember { mutableStateOf("") }
     var showConnectionDialog by remember { mutableStateOf(false) }
-    var serverUrl by remember { mutableStateOf("ws://localhost:8080/ws") }
-    var nickname by remember { mutableStateOf(chatManager.getUserNickname() ?: "") }
+    var serverUrl by remember { mutableStateOf(ChatPreferenceKeys.DEFAULT_SERVER_URL) }
+    var nickname by remember { mutableStateOf(chatManager.getUserNickname() ?: "访客") }
+    var authToken by remember { mutableStateOf("") }
     var receiverUserId by remember { mutableStateOf("") }
     var receiverUserNickname by remember { mutableStateOf("") }
     var wallpaperBgPath by rememberSaveable { mutableStateOf(persistedWallpaperPath.orEmpty()) }
@@ -220,6 +223,7 @@ fun ChatWithModelScreen(
             nickname = it
             if (it.isNotBlank()) chatManager.setUserProfile(it)
         }
+        prefs.getString("auth_token", null)?.let { authToken = it }
         prefs.getString("receiver_user_id", null)?.let { receiverUserId = it }
         prefs.getString("receiver_user_nickname", null)?.let { receiverUserNickname = it }
         prefs.getString("platform", null)?.let {
@@ -486,6 +490,13 @@ fun ChatWithModelScreen(
                                                 chatManager.clearMessages()
                                             }
                                     )
+                                    DropdownMenuItem(
+                                            text = { Text("检查更新") },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                onCheckForUpdates()
+                                            }
+                                    )
                                 }
                             }
                         },
@@ -574,11 +585,13 @@ fun ChatWithModelScreen(
             ConnectionConfigDialog(
                     currentUrl = serverUrl,
                     nickname = nickname,
+                    authToken = authToken,
                     platform = platform,
                     receiverUserId = receiverUserId,
                     receiverUserNickname = receiverUserNickname,
                     onUrlChange = { serverUrl = it },
                     onNicknameChange = { nickname = it },
+                    onAuthTokenChange = { authToken = it },
                     onPlatformChange = { platform = it },
                     onReceiverUserIdChange = { receiverUserId = it },
                     onReceiverUserNicknameChange = { receiverUserNickname = it },
@@ -595,6 +608,7 @@ fun ChatWithModelScreen(
                             prefs.edit()
                                     .putString("last_url", serverUrl)
                                     .putString("nickname", nickname)
+                                    .putString("auth_token", authToken.ifBlank { null })
                                     .putString("platform", sanitizedPlatform.ifBlank { null })
                                     .putString("receiver_user_id", receiverUserId.ifBlank { null })
                                     .putString(
@@ -619,6 +633,7 @@ fun ChatWithModelScreen(
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("URL: $serverUrl")
                             Text("我的昵称: ${nickname.ifBlank { "(未填写)" }}")
+                            Text("访问令牌: ${if (authToken.isBlank()) "(未设置)" else "••••••••"}")
                             val previewPlatform = platform.trim()
                             Text("Platform: ${previewPlatform.ifBlank { "(默认)" }}")
                             Text(
@@ -654,7 +669,11 @@ fun ChatWithModelScreen(
                                     uiLogger.info(
                                             "Confirm connect triggered url=$serverUrl platform=$sanitizedPlatform nickname=$nickname receiverId=${receiverUserId.ifBlank { "(null)" }}"
                                     )
-                                    chatManager.connect(serverUrl, sanitizedPlatform)
+                                    chatManager.connect(
+                                            serverUrl,
+                                            sanitizedPlatform,
+                                            authToken.ifBlank { null }
+                                    )
                                 }
                         ) { Text("连接") }
                     },
@@ -891,7 +910,7 @@ private fun FloatingMessagesOverlay(
                     Column(modifier = Modifier.padding(10.dp).widthIn(max = 320.dp)) {
                         val title =
                                 if (msg.isFromUser) (userNickname ?: "我")
-                                else (senderNameById[msg.id] ?: "对方")
+                                else (senderNameById[msg.id] ?: "MaiBot")
                         Text(
                                 text = title,
                                 style = MaterialTheme.typography.labelMedium,
@@ -981,11 +1000,13 @@ private tailrec fun Context.findActivity(): Activity? =
 private fun ConnectionConfigDialog(
         currentUrl: String,
         nickname: String,
+        authToken: String,
         platform: String,
         receiverUserId: String,
         receiverUserNickname: String,
         onUrlChange: (String) -> Unit,
         onNicknameChange: (String) -> Unit,
+        onAuthTokenChange: (String) -> Unit,
         onPlatformChange: (String) -> Unit,
         onReceiverUserIdChange: (String) -> Unit,
         onReceiverUserNicknameChange: (String) -> Unit,
@@ -994,6 +1015,7 @@ private fun ConnectionConfigDialog(
 ) {
     var tempUrl by remember { mutableStateOf(currentUrl) }
     var tempNickname by remember { mutableStateOf(nickname) }
+    var tempAuthToken by remember { mutableStateOf(authToken) }
     var tempPlatform by remember { mutableStateOf(platform) }
     var tempRecvId by remember { mutableStateOf(receiverUserId) }
     var tempRecvNick by remember { mutableStateOf(receiverUserNickname) }
@@ -1025,6 +1047,17 @@ private fun ConnectionConfigDialog(
                             placeholder = { Text("请输入昵称") },
                             singleLine = true,
                             isError = showErrors && errors.any { it.contains("昵称") }
+                    )
+                    OutlinedTextField(
+                            value = tempAuthToken,
+                            onValueChange = {
+                                tempAuthToken = it
+                                onAuthTokenChange(it)
+                            },
+                            label = { Text("访问令牌（可选）") },
+                            placeholder = { Text("服务端启用鉴权时填写") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation()
                     )
                     OutlinedTextField(
                             value = tempPlatform,
@@ -1089,7 +1122,7 @@ private fun ConnectionConfigDialog(
                         )
                     }
                     Text(
-                            text = "示例: ws://[host]:[port]/ws",
+                            text = "示例: wss://[host]/maibot/ws",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.secondary
                     )
@@ -1111,7 +1144,7 @@ private fun ConnectionConfigDialog(
 }
 
 // 提供默认 platform（保持与服务端默认值一致）
-private fun chatManagerPlatformDefault(): String = "live2d_chat"
+private fun chatManagerPlatformDefault(): String = ChatPreferenceKeys.DEFAULT_PLATFORM
 
 private suspend fun loadBackgroundBitmap(path: String): Bitmap? =
         withContext(Dispatchers.IO) {
@@ -1262,6 +1295,7 @@ private fun calculateInSampleSize(width: Int, height: Int, maxDim: Int): Int {
 private fun sendWallpaperRefreshBroadcast(context: Context, path: String?) {
     val intent =
             Intent(WallpaperComm.ACTION_REFRESH_BACKGROUND).apply {
+                setPackage(context.packageName)
                 putExtra(WallpaperComm.EXTRA_BACKGROUND_PATH, path)
             }
     context.sendBroadcast(intent)
@@ -1270,6 +1304,7 @@ private fun sendWallpaperRefreshBroadcast(context: Context, path: String?) {
 private fun sendWallpaperModelBroadcast(context: Context, folder: String?) {
     val intent =
             Intent(WallpaperComm.ACTION_REFRESH_MODEL).apply {
+                setPackage(context.packageName)
                 putExtra(WallpaperComm.EXTRA_MODEL_FOLDER, folder)
             }
     context.sendBroadcast(intent)

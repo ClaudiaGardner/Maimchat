@@ -2,6 +2,7 @@ package com.l2dchat.live2d
 
 import android.content.Context
 import android.util.Log
+import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,6 +33,9 @@ object Live2DModelManager {
             withContext(Dispatchers.IO) {
                 val models = mutableListOf<ModelInfo>()
                 try {
+                    val hotModels = scanHotModels(context)
+                    models.addAll(hotModels)
+                    val hotModelNames = hotModels.map { it.name.lowercase() }.toSet()
                     val assetManager = context.assets
                     val rootFiles = assetManager.list("") ?: return@withContext emptyList()
                     rootFiles.forEach { folderName ->
@@ -40,7 +44,7 @@ object Live2DModelManager {
                             val modelJsonFile = folderFiles.find { it.endsWith(".model3.json") }
                             if (modelJsonFile != null) {
                                 val info = collectModelInfo(folderName, folderFiles, assetManager)
-                                models.add(info)
+                                if (info.name.lowercase() !in hotModelNames) models.add(info)
                             }
                         } catch (e: IOException) {
                             Log.w(TAG, "扫描文件夹失败: $folderName", e)
@@ -52,6 +56,36 @@ object Live2DModelManager {
                 }
                 models
             }
+
+    private fun scanHotModels(context: Context): List<ModelInfo> {
+        val root = File(context.filesDir, "live2d/models")
+        val directories = root.listFiles { file -> file.isDirectory } ?: return emptyList()
+        return directories.mapNotNull { directory ->
+            val files = directory.walkTopDown().filter { it.isFile }.toList()
+            val modelFile = files.firstOrNull { it.name.endsWith(".model3.json", true) }
+                    ?: return@mapNotNull null
+            val relativePath: (File) -> String = { it.absolutePath }
+            ModelInfo(
+                    name = generateDisplayName(directory.name),
+                    folderPath = directory.absolutePath,
+                    modelFile = relativePath(modelFile),
+                    textureFiles =
+                            files.filter { isImageFile(it.name) }.map(relativePath),
+                    motionFiles =
+                            files.filter { it.name.endsWith(".motion3.json", true) }
+                                    .map(relativePath),
+                    physicsFile =
+                            files.firstOrNull { it.name.endsWith(".physics3.json", true) }
+                                    ?.absolutePath,
+                    poseFile =
+                            files.firstOrNull { it.name.endsWith(".pose3.json", true) }
+                                    ?.absolutePath,
+                    userDataFile =
+                            files.firstOrNull { it.name.endsWith(".userdata3.json", true) }
+                                    ?.absolutePath
+            )
+        }
+    }
 
     private suspend fun collectModelInfo(
             folderName: String,

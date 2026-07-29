@@ -109,6 +109,7 @@ app/release/
 
 # Live2D / model cache (if you create one later)
 live2d_cache/
+dist/
 
 
 # C/C++ native code builds

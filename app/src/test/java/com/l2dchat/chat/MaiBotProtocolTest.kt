@@ -1,0 +1,143 @@
+package com.l2dchat.chat
+
+import com.google.gson.JsonParser
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class MaiBotProtocolTest {
+    @Test
+    fun serializesMaimMessage068PrivateTextEnvelope() {
+        val sender =
+                UserInfo(
+                        platform = "maimchat_android",
+                        userId = "tablet-01",
+                        userNickname = "访客"
+                )
+        val message =
+                MessageBase(
+                        messageInfo =
+                                BaseMessageInfo(
+                                        platform = "maimchat_android",
+                                        messageId = "msg-1",
+                                        time = 1_722_222_222.5,
+                                        senderInfo = SenderInfo(userInfo = sender),
+                                        userInfo = sender,
+                                        formatInfo =
+                                                FormatInfo(
+                                                        contentFormat = listOf("text"),
+                                                        acceptFormat =
+                                                                listOf("text", "image", "emoji", "voice")
+                                                ),
+                                        additionalConfig = mapOf("message_type" to "chat")
+                                ),
+                        messageSegment = Seg("seglist", listOf(Seg("text", "你好"))),
+                        rawMessage = "你好"
+                )
+
+        val json = JsonParser.parseString(message.toJsonString()).asJsonObject
+        val info = json.getAsJsonObject("message_info")
+
+        assertEquals("maimchat_android", info["platform"].asString)
+        assertEquals("tablet-01", info.getAsJsonObject("user_info")["user_id"].asString)
+        assertNull(info["group_info"])
+        assertEquals(
+                "你好",
+                json.getAsJsonObject("message_segment")
+                        .getAsJsonArray("data")[0]
+                        .asJsonObject["data"]
+                        .asString
+        )
+    }
+
+    @Test
+    fun parsesMaimMessage068ReplyEnvelope() {
+        val message =
+                MessageBase.fromJsonString(
+                        """
+                        {
+                          "message_info": {
+                            "platform": "maimchat_android",
+                            "message_id": "reply-1",
+                            "time": 1722222223.0,
+                            "sender_info": {
+                              "user_info": {
+                                "platform": "maimchat_android",
+                                "user_id": "maibot",
+                                "user_nickname": "MaiBot"
+                              }
+                            },
+                            "receiver_info": {
+                              "user_info": {
+                                "platform": "maimchat_android",
+                                "user_id": "tablet-01",
+                                "user_nickname": "访客"
+                              }
+                            }
+                          },
+                          "message_segment": {
+                            "type": "seglist",
+                            "data": [
+                              {"type": "text", "data": "直连成功"}
+                            ]
+                          }
+                        }
+                        """.trimIndent()
+                )
+
+        assertEquals("reply-1", message.messageInfo.messageId)
+        assertEquals("MaiBot", message.messageInfo.senderInfo?.userInfo?.userNickname)
+        val segments = message.messageSegment.data as List<*>
+        assertEquals("直连成功", (segments.single() as Seg).data)
+    }
+
+    @Test
+    fun preservesStructuredAdditionalConfig() {
+        val info =
+                BaseMessageInfo(
+                        additionalConfig =
+                                mapOf(
+                                        "motion" to
+                                                mapOf(
+                                                        "group" to "Happy",
+                                                        "index" to 0,
+                                                        "loop" to false
+                                                )
+                                )
+                )
+
+        val motion = info.toJson().getAsJsonObject("additional_config").getAsJsonObject("motion")
+        assertEquals("Happy", motion["group"].asString)
+        assertEquals(0, motion["index"].asInt)
+    }
+
+    @Test
+    fun hidesMaiBotReplyControlSegmentFromChatBubble() {
+        val message =
+                MessageBase(
+                        messageInfo =
+                                BaseMessageInfo(
+                                        platform = "maimchat_android",
+                                        messageId = "reply-2",
+                                        time = 1_722_222_224.0,
+                                ),
+                        messageSegment =
+                                Seg(
+                                        "seglist",
+                                        listOf(
+                                                Seg("reply", "msg-1"),
+                                                Seg("text", "直连显示正常"),
+                                        ),
+                                ),
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.Success)
+        assertEquals(
+                "直连显示正常",
+                (result as Live2DChatMessageHandler.ChatMessageResult.Success).message.content,
+        )
+    }
+}

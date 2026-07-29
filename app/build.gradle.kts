@@ -13,6 +13,10 @@ val signingProps = Properties().apply {
         load(signingPropsFile.inputStream())
     }
 }
+val maimchatVersionCode =
+    providers.environmentVariable("MAIMCHAT_VERSION_CODE").orElse("26072801").get().toInt()
+val maimchatVersionName =
+    providers.environmentVariable("MAIMCHAT_VERSION_NAME").orElse("0.2.0-dev").get()
 
 android {
     namespace = "com.l2dchat"
@@ -22,27 +26,25 @@ android {
     applicationId = "com.l2dchat"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = maimchatVersionCode
+        versionName = maimchatVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
-        create("release") {
-            if (!signingPropsFile.exists()) {
-                // 如果缺少签名文件，给出清晰错误，防止构建一个未签名的 release
-                throw GradleException("缺少 signing.properties，请创建并填写签名信息后再构建 release")
+        if (signingPropsFile.exists()) {
+            create("release") {
+                val storePath = signingProps.getProperty("storeFile")
+                    ?: throw GradleException("signing.properties 缺少 storeFile")
+                storeFile = rootProject.file(storePath)
+                storePassword = signingProps.getProperty("storePassword")
+                    ?: throw GradleException("signing.properties 缺少 storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                    ?: throw GradleException("signing.properties 缺少 keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+                    ?: throw GradleException("signing.properties 缺少 keyPassword")
             }
-            val storePath = signingProps.getProperty("storeFile")
-                ?: throw GradleException("signing.properties 缺少 storeFile")
-            storeFile = rootProject.file(storePath)
-            storePassword = signingProps.getProperty("storePassword")
-                ?: throw GradleException("signing.properties 缺少 storePassword")
-            keyAlias = signingProps.getProperty("keyAlias")
-                ?: throw GradleException("signing.properties 缺少 keyAlias")
-            keyPassword = signingProps.getProperty("keyPassword")
-                ?: throw GradleException("signing.properties 缺少 keyPassword")
         }
     }
 
@@ -51,7 +53,7 @@ android {
             // 打开混淆与资源压缩（如不需要可改为 false）
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -71,6 +73,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

@@ -241,12 +241,7 @@ data class BaseMessageInfo(
         additionalConfig?.let {
             val obj = JsonObject()
             it.forEach { (k, v) ->
-                when (v) {
-                    is String -> obj.addProperty(k, v)
-                    is Number -> obj.addProperty(k, v)
-                    is Boolean -> obj.addProperty(k, v)
-                    else -> obj.addProperty(k, v.toString())
-                }
+                obj.add(k, Gson().toJsonTree(v))
             }
             json.add("additional_config", obj)
         }

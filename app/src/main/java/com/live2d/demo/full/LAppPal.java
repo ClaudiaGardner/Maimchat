@@ -13,6 +13,9 @@ import android.util.Log;
 import com.live2d.demo.LAppDefine;
 import com.live2d.sdk.cubism.core.ICubismLogger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -51,13 +54,14 @@ public class LAppPal {
             if (context == null) {
                 return new byte[0];
             }
-            fileData = context.getAssets().open(path);
-
-            int fileSize = fileData.available();
-            byte[] fileBuffer = new byte[fileSize];
-            fileData.read(fileBuffer, 0, fileSize);
-
-            return fileBuffer;
+            fileData = openFileStream(context, path);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[16 * 1024];
+            int count;
+            while ((count = fileData.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
         } catch (IOException e) {
             e.printStackTrace();
 
@@ -79,6 +83,14 @@ public class LAppPal {
                 }
             }
         }
+    }
+
+    public static InputStream openFileStream(Context context, String path) throws IOException {
+        File file = new File(path);
+        if (file.isAbsolute()) {
+            return new FileInputStream(file);
+        }
+        return context.getAssets().open(path);
     }
 
     // デルタタイム(前回フレームとの差分)を取得する

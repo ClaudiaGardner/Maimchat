@@ -6,6 +6,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
+import com.l2dchat.preferences.ChatPreferenceKeys
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,7 @@ import okhttp3.WebSocketListener
 
 class ChatWebSocketManager {
     companion object {
-        private const val DEFAULT_PLATFORM = "live2d_chat"
+        private const val DEFAULT_PLATFORM = ChatPreferenceKeys.DEFAULT_PLATFORM
     }
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
@@ -69,7 +70,6 @@ class ChatWebSocketManager {
     private var lastConnectPlatform: String? = null
     private var lastConnectAuth: String? = null
     private var retryCount: Int = 0
-    private val maxRetries = 3
     private var userInitiatedDisconnect = false
     private var reconnectJobActive = false
 
@@ -130,8 +130,7 @@ class ChatWebSocketManager {
                 Request.Builder()
                         .url(url)
                         .addHeader("platform", activePlatform)
-                        .addHeader("Sec-WebSocket-Protocol", "chat")
-        this.authToken?.let { requestBuilder.addHeader("Authorization", "Bearer $it") }
+        this.authToken?.let { requestBuilder.addHeader("Authorization", it) }
         val request = requestBuilder.build()
 
         val authStatus =
@@ -248,17 +247,14 @@ class ChatWebSocketManager {
             reportConnectionError("无法自动重连：缺少上次连接的服务器地址，请重新配置连接信息")
             return
         }
-        if (retryCount >= maxRetries) {
-            reportConnectionError("达到最大重试次数($maxRetries)，已停止自动重连，请检查服务器状态或网络")
-            return
-        }
         if (reconnectJobActive) {
             logger.debug("已有重连任务，跳过重复调度", throttleMs = 2_000L, throttleKey = "reconnect_skip")
             return
         }
-        val delayMs = 1500L * (retryCount + 1)
+        val exponentialStep = retryCount.coerceAtMost(5)
+        val delayMs = (1_500L * (1L shl exponentialStep)).coerceAtMost(30_000L)
         reconnectJobActive = true
-        retryCount += 1
+        retryCount = (retryCount + 1).coerceAtMost(1_000_000)
         logger.info("计划 ${delayMs}ms 后进行第 $retryCount 次重连 ...")
         scope.launch {
             try {
@@ -383,6 +379,11 @@ class ChatWebSocketManager {
                                                 if (srvTs > 0) srvTs else result.message.timestamp
                                 )
                         addMessage(adjusted)
+                        if (!fromUser) {
+                            inferMotionGroup(adjusted.content)?.let { group ->
+                                onMotionTrigger?.invoke(group, 0, false)
+                            }
+                        }
                         if (srvTs > 0 && srvTs > lastServerMessageTime)
                                 lastServerMessageTime = srvTs
                     }
@@ -608,6 +609,20 @@ class ChatWebSocketManager {
             "msg_${System.currentTimeMillis()}_${(Math.random()*1000).toInt()}"
     private fun generateUserId(): String =
             "u_${System.currentTimeMillis()}_${(Math.random()*1000).toInt()}"
+
+    private fun inferMotionGroup(text: String): String? {
+        val normalized = text.lowercase()
+        return when {
+            listOf("晚安", "困了", "休息", "sleep").any(normalized::contains) -> "Sleep"
+            listOf("生气", "讨厌", "哼", "angry").any(normalized::contains) -> "Angry"
+            listOf("难过", "抱歉", "对不起", "哭", "sad").any(normalized::contains) -> "Sad"
+            listOf("惊讶", "没想到", "真的吗", "surprise").any(normalized::contains) -> "Surprise"
+            listOf("想想", "让我想", "思考", "think").any(normalized::contains) -> "Think"
+            listOf("开心", "太好了", "哈哈", "谢谢", "happy").any(normalized::contains) -> "Happy"
+            else -> null
+        }
+    }
+
     fun disconnect() {
         userInitiatedDisconnect = true
         try {

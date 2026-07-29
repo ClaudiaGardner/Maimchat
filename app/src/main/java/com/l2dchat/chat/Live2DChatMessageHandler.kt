@@ -38,6 +38,9 @@ class Live2DChatMessageHandler {
             "text" -> content.addText(segment.data.toString())
             "emoji" -> content.addEmoji(segment.data.toString())
             "voice" -> content.addVoice(segment.data.toString())
+            // MaiBot prepends this control segment when replying to a message. It is routing
+            // metadata, not user-visible text.
+            "reply" -> Unit
             "seglist" -> {
                 @Suppress("UNCHECKED_CAST") val segList = segment.data as List<Seg>
                 for (child in segList) {
