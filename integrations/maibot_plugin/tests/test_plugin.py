@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,16 +27,21 @@ class FakeSend:
         return self.result
 
 
-def configured_plugin(*, camera_enabled: bool = True) -> tuple[plugin.MaimchatDevicePlugin, FakeSend]:
+def configured_plugin(
+    *,
+    camera_enabled: bool = True,
+    call_tts_enabled: bool = True,
+) -> tuple[plugin.MaimchatDevicePlugin, FakeSend]:
     instance = plugin.create_plugin()
     instance.set_plugin_config(
         {
             "plugin": {
                 "enabled": True,
-                "config_version": "1.0.0",
+                "config_version": "1.1.0",
             },
             "features": {
                 "camera_requests_enabled": camera_enabled,
+                "call_tts_enabled": call_tts_enabled,
             }
         }
     )
@@ -88,6 +95,12 @@ class ProtocolBuilderTests(unittest.TestCase):
         self.assertEqual(payload["camera"], "front")
         self.assertRegex(payload["request_id"], re.compile(r"^maimchat-[0-9a-f]{32}$"))
 
+    def test_clean_speech_text_removes_markdown_and_urls(self) -> None:
+        self.assertEqual(
+            plugin.clean_speech_text("**你好** [这里](https://example.test)"),
+            "你好 这里",
+        )
+
 
 class PluginToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_avatar_tool_sends_custom_segment_to_current_stream(self) -> None:
@@ -130,6 +143,28 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
         instance, sender = configured_plugin()
 
         result = await instance.handle_avatar_intent(emotion="happy")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(sender.calls, [])
+
+    async def test_speak_tool_sends_generated_wav_as_voice_segment(self) -> None:
+        instance, sender = configured_plugin()
+
+        with patch.object(plugin, "_synthesize_voice", return_value=b"RIFF-test-wav"):
+            result = await instance.handle_speak(
+                text="你好呀",
+                stream_id="stream-call",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(sender.calls[0][0], "voice")
+        self.assertEqual(sender.calls[0][2], "stream-call")
+        self.assertEqual(base64.b64decode(sender.calls[0][1]), b"RIFF-test-wav")
+
+    async def test_speak_tool_respects_server_side_switch(self) -> None:
+        instance, sender = configured_plugin(call_tts_enabled=False)
+
+        result = await instance.handle_speak(text="不会播放", stream_id="stream-call")
 
         self.assertFalse(result["success"])
         self.assertEqual(sender.calls, [])

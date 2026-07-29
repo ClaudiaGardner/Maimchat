@@ -1,3 +1,7 @@
+/*
+ * Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V5
+ * Edge-to-edge companion stage · zero persistent chrome · conversation/video dual mode
+ */
 package com.l2dchat.ui.screens
 
 import android.Manifest
@@ -16,6 +20,9 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -30,12 +37,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.StopCircle
-import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -45,6 +50,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -67,10 +75,15 @@ import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.media.DeviceAudioRecorder
 import com.l2dchat.media.DeviceCameraSnapshotController
+import com.l2dchat.media.DeviceVideoCallCameraController
 import com.l2dchat.media.DeviceVoiceActivityRecorder
 import com.l2dchat.ui.components.CameraCaptureDialog
 import com.l2dchat.preferences.ChatPreferenceKeys
+import com.l2dchat.ui.components.CompanionMode
+import com.l2dchat.ui.components.ImmersiveCompanionControls
+import com.l2dchat.ui.components.ImmersivePresenceControls
 import com.l2dchat.ui.components.LogViewerDialog
+import com.l2dchat.ui.components.VideoCallOverlay
 import com.l2dchat.wallpaper.Live2DWallpaperService
 import com.l2dchat.wallpaper.WallpaperComm
 import com.yalantis.ucrop.UCrop
@@ -106,7 +119,8 @@ fun ChatWithModelScreen(
         modelKey: Int,
         onModelSelectionRequest: () -> Unit,
         onModelChanged: (Live2DModelManager.ModelInfo?) -> Unit,
-        onCheckForUpdates: () -> Unit
+        onCheckForUpdates: () -> Unit,
+        debugOpenVideoCall: Boolean = false
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -168,6 +182,8 @@ fun ChatWithModelScreen(
     val connectionErrorBanners = remember { mutableStateListOf<ConnectionErrorBanner>() }
     var suppressMissingUrlWarning by rememberSaveable { mutableStateOf(true) }
     var showCameraCapture by remember { mutableStateOf(false) }
+    var showVideoCall by rememberSaveable { mutableStateOf(false) }
+    var videoCallMicrophoneMuted by rememberSaveable { mutableStateOf(false) }
     var isRecording by remember { mutableStateOf(false) }
     var handsFreeVoiceEnabled by
             rememberSaveable {
@@ -181,6 +197,27 @@ fun ChatWithModelScreen(
                 mutableStateOf(prefs.getBoolean(PREF_REMOTE_CAMERA, false))
             }
     var requestRemoteCameraAfterPermission by remember { mutableStateOf(false) }
+    var debugOpenVideoCallHandled by remember { mutableStateOf(false) }
+    var initialConversationSetupHandled by rememberSaveable { mutableStateOf(false) }
+    var controlsVisible by rememberSaveable { mutableStateOf(false) }
+    var controlsInteractionVersion by remember { mutableIntStateOf(0) }
+    var showTextComposer by rememberSaveable { mutableStateOf(false) }
+    var overflowExpanded by remember { mutableStateOf(false) }
+
+    val revealControls: () -> Unit = {
+        controlsVisible = true
+        controlsInteractionVersion++
+    }
+
+    val videoCallCameraController =
+            remember(context, lifecycleOwner) {
+                DeviceVideoCallCameraController(
+                        context.applicationContext,
+                        lifecycleOwner
+                )
+            }
+    val videoCallActiveState = rememberUpdatedState(showVideoCall)
+    val cameraCaptureActiveState = rememberUpdatedState(showCameraCapture)
 
     val voiceActivityRecorder =
             remember(context, chatManager) {
@@ -194,7 +231,21 @@ fun ChatWithModelScreen(
                                 if (chatManager.connectionState.value ==
                                                 ChatServiceClient.ChatConnectionState.CONNECTED
                                 ) {
-                                    chatManager.sendVoice(file)
+                                    if (videoCallActiveState.value) {
+                                        videoCallCameraController.capture(
+                                                onCaptured = { imageFile ->
+                                                    chatManager.sendCallTurn(imageFile, file)
+                                                },
+                                                onError = { error ->
+                                                    uiLogger.warn(
+                                                            "通话关键帧获取失败，降级为纯语音：$error"
+                                                    )
+                                                    chatManager.sendVoice(file)
+                                                }
+                                        )
+                                    } else {
+                                        chatManager.sendVoice(file)
+                                    }
                                 } else {
                                     withContext(Dispatchers.IO) { file.delete() }
                                 }
@@ -202,13 +253,18 @@ fun ChatWithModelScreen(
                         },
                         onError = { message ->
                             scope.launch {
-                                handsFreeVoiceEnabled = false
-                                prefs.edit()
-                                        .putBoolean(PREF_HANDS_FREE_VOICE, false)
-                                        .apply()
+                                if (videoCallActiveState.value) {
+                                    showVideoCall = false
+                                    videoCallMicrophoneMuted = false
+                                } else {
+                                    handsFreeVoiceEnabled = false
+                                    prefs.edit()
+                                            .putBoolean(PREF_HANDS_FREE_VOICE, false)
+                                            .apply()
+                                }
                                 Toast.makeText(
                                                 context,
-                                                "免按键收音已停止：$message",
+                                                "实时收音已停止：$message",
                                                 Toast.LENGTH_LONG
                                         )
                                         .show()
@@ -267,6 +323,25 @@ fun ChatWithModelScreen(
                 }
                 requestHandsFreeAfterPermission = false
             }
+    val videoCallPermissionLauncher =
+            rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+            ) { permissions ->
+                val cameraGranted = permissions[Manifest.permission.CAMERA] == true
+                val microphoneGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
+                if (cameraGranted && microphoneGranted) {
+                    showVideoCall = true
+                    videoCallMicrophoneMuted = false
+                    if (!speakerEnabled) chatManager.setSpeakerEnabled(true)
+                } else {
+                    Toast.makeText(
+                                    context,
+                                    "视频通话需要相机和麦克风权限",
+                                    Toast.LENGTH_LONG
+                            )
+                            .show()
+                }
+            }
     val cameraPermissionLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
                     granted ->
@@ -282,6 +357,96 @@ fun ChatWithModelScreen(
                 }
                 requestRemoteCameraAfterPermission = false
             }
+
+    val enterConversationMode: () -> Unit = {
+        revealControls()
+        showVideoCall = false
+        videoCallMicrophoneMuted = false
+        if (!chatManager.hasUserNickname()) {
+            showConnectionDialog = true
+        } else if (ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            setHandsFreeVoiceEnabled(true)
+        } else {
+            requestHandsFreeAfterPermission = true
+            microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    val enterVideoMode: () -> Unit = {
+        revealControls()
+        if (!chatManager.hasUserNickname()) {
+            showConnectionDialog = true
+        } else if (
+                ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED &&
+                        ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            showVideoCall = true
+            videoCallMicrophoneMuted = false
+            if (!speakerEnabled) chatManager.setSpeakerEnabled(true)
+        } else {
+            videoCallPermissionLauncher.launch(
+                    arrayOf(
+                            Manifest.permission.CAMERA,
+                            Manifest.permission.RECORD_AUDIO
+                    )
+            )
+        }
+    }
+
+    LaunchedEffect(connectionState, debugOpenVideoCall) {
+        if (debugOpenVideoCall ||
+                        initialConversationSetupHandled ||
+                        connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
+        ) {
+            return@LaunchedEffect
+        }
+        initialConversationSetupHandled = true
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED
+        ) {
+            setHandsFreeVoiceEnabled(true)
+        } else {
+            requestHandsFreeAfterPermission = true
+            microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    LaunchedEffect(debugOpenVideoCall, connectionState) {
+        if (!debugOpenVideoCall ||
+                        debugOpenVideoCallHandled ||
+                        connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
+        ) {
+            return@LaunchedEffect
+        }
+        debugOpenVideoCallHandled = true
+        val cameraGranted =
+                ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED
+        val microphoneGranted =
+                ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED
+        if (cameraGranted && microphoneGranted) {
+            showVideoCall = true
+            videoCallMicrophoneMuted = false
+            revealControls()
+            if (!speakerEnabled) chatManager.setSpeakerEnabled(true)
+        } else {
+            videoCallPermissionLauncher.launch(
+                    arrayOf(
+                            Manifest.permission.CAMERA,
+                            Manifest.permission.RECORD_AUDIO
+                    )
+            )
+        }
+    }
 
     var isLoadingDefaultModel by remember { mutableStateOf(selectedModel == null) }
     var currentModel by remember(modelKey) { mutableStateOf(selectedModel) }
@@ -306,21 +471,31 @@ fun ChatWithModelScreen(
         lifecycleManager?.setLipSyncActive(isSpeaking)
     }
 
-    LaunchedEffect(handsFreeVoiceEnabled) {
-        if (handsFreeVoiceEnabled) {
+    val automaticVoiceEnabled = handsFreeVoiceEnabled || showVideoCall
+
+    LaunchedEffect(automaticVoiceEnabled) {
+        if (automaticVoiceEnabled) {
             val result = withContext(Dispatchers.IO) { voiceActivityRecorder.start() }
             result.onSuccess {
                 voiceActivityRecorder.setPaused(
                         isSpeaking ||
+                                videoCallMicrophoneMuted ||
+                                showCameraCapture ||
+                                isRecording ||
                                 connectionState !=
                                         ChatServiceClient.ChatConnectionState.CONNECTED
                 )
             }.onFailure { error ->
-                handsFreeVoiceEnabled = false
-                prefs.edit().putBoolean(PREF_HANDS_FREE_VOICE, false).apply()
+                if (showVideoCall) {
+                    showVideoCall = false
+                    videoCallMicrophoneMuted = false
+                } else {
+                    handsFreeVoiceEnabled = false
+                    prefs.edit().putBoolean(PREF_HANDS_FREE_VOICE, false).apply()
+                }
                 Toast.makeText(
                                 context,
-                                "无法开启免按键收音：${error.message ?: "未知错误"}",
+                                "无法开启实时收音：${error.message ?: "未知错误"}",
                                 Toast.LENGTH_LONG
                         )
                         .show()
@@ -331,28 +506,67 @@ fun ChatWithModelScreen(
     }
 
     LaunchedEffect(
-            handsFreeVoiceEnabled,
+            automaticVoiceEnabled,
             handsFreeVoiceState,
             isSpeaking,
-            connectionState
+            connectionState,
+            videoCallMicrophoneMuted,
+            showCameraCapture,
+            isRecording
     ) {
-        if (handsFreeVoiceEnabled && voiceActivityRecorder.isRunning) {
+        if (automaticVoiceEnabled && voiceActivityRecorder.isRunning) {
             voiceActivityRecorder.setPaused(
                     isSpeaking ||
+                            videoCallMicrophoneMuted ||
+                            showCameraCapture ||
+                            isRecording ||
                             connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
             )
         }
     }
 
+    LaunchedEffect(showVideoCall) {
+        if (showVideoCall) {
+            if (!speakerEnabled) chatManager.setSpeakerEnabled(true)
+        } else {
+            videoCallCameraController.stop()
+            videoCallMicrophoneMuted = false
+        }
+    }
+
+    LaunchedEffect(
+            controlsVisible,
+            controlsInteractionVersion,
+            overflowExpanded,
+            showTextComposer,
+            showConnectionDialog,
+            showWallpaperDialog,
+            showModelTransformDialog,
+            showLogViewer
+    ) {
+        if (!controlsVisible ||
+                        overflowExpanded ||
+                        showTextComposer ||
+                        showConnectionDialog ||
+                        showWallpaperDialog ||
+                        showModelTransformDialog ||
+                        showLogViewer
+        ) {
+            return@LaunchedEffect
+        }
+        delay(5_000)
+        controlsVisible = false
+    }
+
     DisposableEffect(
             chatManager,
             remoteCameraController,
-            remoteCameraEnabled,
-            showCameraCapture
+            remoteCameraEnabled
     ) {
         chatManager.setDeviceRequestCallback { request ->
             if (!remoteCameraEnabled ||
-                            showCameraCapture ||
+                            cameraCaptureActiveState.value ||
+                            videoCallActiveState.value ||
                             request.type != DeviceRequest.Type.CAMERA_SNAPSHOT
             ) {
                 return@setDeviceRequestCallback
@@ -508,6 +722,9 @@ fun ChatWithModelScreen(
     DisposableEffect(voiceActivityRecorder) {
         onDispose { voiceActivityRecorder.stop() }
     }
+    DisposableEffect(videoCallCameraController) {
+        onDispose { videoCallCameraController.stop() }
+    }
 
     LaunchedEffect(currentModel) {
         val folder = currentModel?.folderPath
@@ -596,9 +813,44 @@ fun ChatWithModelScreen(
     DisposableEffect(modelKey) { onDispose { lifecycleManager?.destroy() } }
 
     val chatInputHeightDp = with(LocalDensity.current) { chatInputHeightPx.toDp() }
-    val floatingBottomPadding = maxOf(reservedBottomHeight, chatInputHeightDp) + 8.dp
+    val floatingBottomPadding =
+            if (showTextComposer) {
+                maxOf(reservedBottomHeight, chatInputHeightDp) + 8.dp
+            } else {
+                112.dp
+            }
+    val companionMode =
+            if (showVideoCall) CompanionMode.VIDEO else CompanionMode.CONVERSATION
+    val companionMicrophoneMuted =
+            if (showVideoCall) videoCallMicrophoneMuted else !handsFreeVoiceEnabled
+    val companionStatusText =
+            when {
+                connectionState != ChatServiceClient.ChatConnectionState.CONNECTED ->
+                        chatManager.getConnectionStateDescription()
+                isSpeaking -> "正在回应"
+                companionMicrophoneMuted -> "麦克风已关闭"
+                handsFreeVoiceState == DeviceVoiceActivityRecorder.State.SPEAKING ->
+                        "正在听你说话"
+                handsFreeVoiceState == DeviceVoiceActivityRecorder.State.PAUSED ->
+                        "收音已暂停"
+                else -> "正在聆听"
+            }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+            modifier =
+                    Modifier.fillMaxSize().pointerInput(isGestureAdjustmentMode) {
+                        if (!isGestureAdjustmentMode) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (event.changes.any { it.changedToUpIgnoreConsumed() }) {
+                                        revealControls()
+                                    }
+                                }
+                            }
+                        }
+                    }
+    ) {
         backgroundBitmap?.let { bmp ->
             Image(
                     bitmap = bmp.asImageBitmap(),
@@ -630,105 +882,136 @@ fun ChatWithModelScreen(
                 Text("正在清理资源并重新初始化", style = MaterialTheme.typography.bodySmall)
             }
         } else if (currentModel != null) {
-            // 重新布局：模型始终全屏放在最底层；TopBar + 消息 + 输入框作为浮层，不再挤压 GLSurfaceView 尺寸
+            // 角色是整个设备的主界面。所有控制都作为可召回浮层，不再为工具栏预留画布。
             Box(modifier = Modifier.fillMaxSize()) {
-                // 使用 Column 保留底部固定高度空白区域，防止模型绘制与输入区重叠
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Box(
-                            modifier =
-                                    Modifier.weight(1f)
-                                            .fillMaxWidth()
-                                            // 下移模型绘制区域，避免头像穿过顶部栏
-                                            .padding(top = TopBarHeight)
-                    ) {
-                        Live2DModelViewer(
-                                model = currentModel!!,
-                                modelKey = resetCounter,
-                                chatManager = chatManager,
-                                lifecycleManager = lifecycleManager,
-                                modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // 固定空白区域，不随输入框/键盘变化
-                    Spacer(modifier = Modifier.fillMaxWidth().height(reservedBottomHeight))
-                }
+                Live2DModelViewer(
+                        model = currentModel!!,
+                        modelKey = resetCounter,
+                        chatManager = chatManager,
+                        lifecycleManager = lifecycleManager,
+                        modifier = Modifier.fillMaxSize()
+                )
 
-                // 顶部栏浮层
-                var overflowExpanded by remember { mutableStateOf(false) }
-                TopAppBar(
-                        title = {
-                            Column {
-                                Text(currentModel!!.name)
-                                Text(
-                                        text =
-                                                chatManager.getConnectionStateDescription() +
-                                                        when (connectionState) {
-                                                            ChatServiceClient.ChatConnectionState
-                                                                    .CONNECTING -> " (校验配置...)"
-                                                            else -> ""
-                                                        },
-                                        style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        },
-                        actions = {
-                            if (isLandscape) {
-                                IconButton(onClick = { applyLiveWallpaper(context) }) {
-                                    Icon(
-                                            Icons.Default.Wallpaper,
-                                            contentDescription = "应用为系统壁纸"
-                                    )
-                                }
-                            }
-                            IconButton(
-                                    onClick = {
-                                        wallpaperTempPath = wallpaperBgPath
-                                        showWallpaperDialog = true
-                                    }
-                            ) { Icon(Icons.Default.Image, contentDescription = "壁纸背景设置") }
-                            // 配置按钮
-                            IconButton(onClick = { showConnectionDialog = true }) {
-                                Icon(Icons.Default.Settings, contentDescription = "连接配置")
-                            }
-                            // 连接按钮（仅在未连接时显示）
-                            if (connectionState ==
-                                            ChatServiceClient.ChatConnectionState.DISCONNECTED ||
-                                            connectionState ==
-                                                    ChatServiceClient.ChatConnectionState.ERROR
-                            ) {
-                                IconButton(
-                                        onClick = {
-                                            val errors = validateConfig(serverUrl, nickname)
-                                            uiLogger.debug(
-                                                    "Connect action tapped state=${connectionState.name} url=$serverUrl nickname=$nickname errors=${errors.joinToString()}"
-                                            )
-                                            if (errors.isEmpty()) {
-                                                showConnectConfirm = true
-                                            } else {
-                                                // 打开配置对话框并提示
+                AnimatedVisibility(
+                        visible = controlsVisible,
+                        enter = fadeIn(animationSpec = tween(180)),
+                        exit = fadeOut(animationSpec = tween(140)),
+                        modifier = Modifier.align(Alignment.TopCenter)
+                ) {
+                    ImmersivePresenceControls(
+                            modelName = currentModel!!.name,
+                            connectionText =
+                                    chatManager.getConnectionStateDescription() +
+                                            when (connectionState) {
+                                                ChatServiceClient.ChatConnectionState.CONNECTING ->
+                                                        " · 校验中"
+                                                else -> ""
+                                            },
+                            connected =
+                                    connectionState ==
+                                            ChatServiceClient.ChatConnectionState.CONNECTED,
+                            overflowExpanded = overflowExpanded,
+                            onOverflowExpandedChange = {
+                                overflowExpanded = it
+                                if (it) revealControls()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                    ) {
+                                    DropdownMenuItem(
+                                            text = { Text("连接设置") },
+                                            leadingIcon = {
+                                                Icon(
+                                                        Icons.Default.Settings,
+                                                        contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
                                                 showConnectionDialog = true
                                             }
-                                        }
-                                ) { Icon(Icons.Filled.PlayArrow, contentDescription = "连接") }
-                            }
-                            // 断开按钮（仅在连接中或已连接时显示）
-                            if (connectionState ==
-                                            ChatServiceClient.ChatConnectionState.CONNECTED ||
-                                            connectionState ==
-                                                    ChatServiceClient.ChatConnectionState.CONNECTING
-                            ) {
-                                IconButton(onClick = { chatManager.disconnect() }) {
-                                    Icon(Icons.Filled.Stop, contentDescription = "断开")
-                                }
-                            }
-                            Box {
-                                IconButton(onClick = { overflowExpanded = true }) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "更多操作")
-                                }
-                                DropdownMenu(
-                                        expanded = overflowExpanded,
-                                        onDismissRequest = { overflowExpanded = false }
-                                ) {
+                                    )
+                                    DropdownMenuItem(
+                                            text = { Text("更换背景") },
+                                            leadingIcon = {
+                                                Icon(
+                                                        Icons.Default.Image,
+                                                        contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                wallpaperTempPath = wallpaperBgPath
+                                                showWallpaperDialog = true
+                                            }
+                                    )
+                                    if (connectionState ==
+                                                    ChatServiceClient.ChatConnectionState
+                                                            .DISCONNECTED ||
+                                                    connectionState ==
+                                                            ChatServiceClient.ChatConnectionState
+                                                                    .ERROR
+                                    ) {
+                                        DropdownMenuItem(
+                                                text = { Text("连接") },
+                                                leadingIcon = {
+                                                    Icon(
+                                                            Icons.Default.PlayArrow,
+                                                            contentDescription = null
+                                                    )
+                                                },
+                                                onClick = {
+                                                    overflowExpanded = false
+                                                    val errors =
+                                                            validateConfig(serverUrl, nickname)
+                                                    if (errors.isEmpty()) {
+                                                        showConnectConfirm = true
+                                                    } else {
+                                                        showConnectionDialog = true
+                                                    }
+                                                }
+                                        )
+                                    } else {
+                                        DropdownMenuItem(
+                                                text = { Text("断开连接") },
+                                                leadingIcon = {
+                                                    Icon(
+                                                            Icons.Default.Stop,
+                                                            contentDescription = null
+                                                    )
+                                                },
+                                                onClick = {
+                                                    overflowExpanded = false
+                                                    chatManager.disconnect()
+                                                }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                            text = { Text("拍照发送") },
+                                            leadingIcon = {
+                                                Icon(
+                                                        Icons.Default.CameraAlt,
+                                                        contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                if (!chatManager.hasUserNickname()) {
+                                                    showConnectionDialog = true
+                                                } else if (ContextCompat.checkSelfPermission(
+                                                                context,
+                                                                Manifest.permission.CAMERA
+                                                        ) ==
+                                                        PackageManager.PERMISSION_GRANTED
+                                                ) {
+                                                    showCameraCapture = true
+                                                } else {
+                                                    requestRemoteCameraAfterPermission = false
+                                                    cameraPermissionLauncher.launch(
+                                                            Manifest.permission.CAMERA
+                                                    )
+                                                }
+                                            }
+                                    )
                                     DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -817,6 +1100,22 @@ fun ChatWithModelScreen(
                                             }
                                     )
                                     DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                        if (showTextComposer) {
+                                                            "隐藏文字输入"
+                                                        } else {
+                                                            "文字输入"
+                                                        }
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                showTextComposer = !showTextComposer
+                                                revealControls()
+                                            }
+                                    )
+                                    DropdownMenuItem(
                                             text = { Text("查看日志") },
                                             onClick = {
                                                 overflowExpanded = false
@@ -868,11 +1167,8 @@ fun ChatWithModelScreen(
                                                 onCheckForUpdates()
                                             }
                                     )
-                                }
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.TopCenter)
-                )
+                    }
+                }
 
                 if (isGestureAdjustmentMode) {
                     Surface(
@@ -919,17 +1215,29 @@ fun ChatWithModelScreen(
                     }
                 }
 
-                FloatingMessagesOverlay(
-                        recentMessages = messages,
-                        standardMessages = standardMessages,
-                        userNickname = currentUserNickname,
-                        maxVisibleMessages = if (isLandscape) 2 else 5,
+                AnimatedVisibility(
+                        visible = controlsVisible && showTextComposer,
+                        enter = fadeIn(animationSpec = tween(180)),
+                        exit = fadeOut(animationSpec = tween(140)),
                         modifier =
                                 Modifier.align(Alignment.BottomStart)
                                         .padding(start = 12.dp, bottom = floatingBottomPadding)
-                )
+                ) {
+                    FloatingMessagesOverlay(
+                            recentMessages = messages,
+                            standardMessages = standardMessages,
+                            userNickname = currentUserNickname,
+                            maxVisibleMessages = if (isLandscape) 2 else 3
+                    )
+                }
 
-                ChatInputBar(
+                AnimatedVisibility(
+                        visible = controlsVisible && showTextComposer,
+                        enter = fadeIn(animationSpec = tween(180)),
+                        exit = fadeOut(animationSpec = tween(140)),
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                ) {
+                    ChatInputBar(
                         inputText = inputText,
                         onInputChange = { inputText = it },
                         enabled =
@@ -945,20 +1253,7 @@ fun ChatWithModelScreen(
                                 }
                             }
                         },
-                        onCamera = {
-                            if (!chatManager.hasUserNickname()) {
-                                showConnectionDialog = true
-                            } else if (ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.CAMERA
-                                    ) == PackageManager.PERMISSION_GRANTED
-                            ) {
-                                showCameraCapture = true
-                            } else {
-                                requestRemoteCameraAfterPermission = false
-                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                            }
-                        },
+                        onCamera = enterVideoMode,
                         isRecording = isRecording,
                         handsFreeVoiceEnabled = handsFreeVoiceEnabled,
                         handsFreeVoiceState = handsFreeVoiceState,
@@ -1013,13 +1308,42 @@ fun ChatWithModelScreen(
                                     .show()
                         },
                         modifier =
-                                Modifier.align(Alignment.BottomCenter).onSizeChanged { coords ->
+                                Modifier.onSizeChanged { coords ->
                                     val newHeight = coords.height
                                     if (chatInputHeightPx != newHeight) {
                                         chatInputHeightPx = newHeight
                                     }
                                 }
-                )
+                    )
+                }
+
+                AnimatedVisibility(
+                        visible = controlsVisible && !showTextComposer,
+                        enter = fadeIn(animationSpec = tween(180)),
+                        exit = fadeOut(animationSpec = tween(140)),
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                ) {
+                    ImmersiveCompanionControls(
+                            mode = companionMode,
+                            statusText = companionStatusText,
+                            microphoneMuted = companionMicrophoneMuted,
+                            speakerEnabled = speakerEnabled,
+                            onConversationMode = enterConversationMode,
+                            onVideoMode = enterVideoMode,
+                            onMicrophoneToggle = {
+                                if (showVideoCall) {
+                                    videoCallMicrophoneMuted = !videoCallMicrophoneMuted
+                                } else if (handsFreeVoiceEnabled) {
+                                    setHandsFreeVoiceEnabled(false)
+                                } else {
+                                    enterConversationMode()
+                                }
+                            },
+                            onSpeakerToggle = {
+                                chatManager.setSpeakerEnabled(!speakerEnabled)
+                            }
+                    )
+                }
             }
         } else {
             Column(
@@ -1037,6 +1361,25 @@ fun ChatWithModelScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(onClick = onModelSelectionRequest) { Text("选择模型") }
             }
+        }
+        if (showVideoCall) {
+            VideoCallOverlay(
+                    cameraController = videoCallCameraController,
+                    voiceState = handsFreeVoiceState,
+                    controlsVisible = controlsVisible,
+                    microphoneMuted = videoCallMicrophoneMuted,
+                    botSpeaking = isSpeaking,
+                    onError = { error ->
+                        showVideoCall = false
+                        videoCallMicrophoneMuted = false
+                        Toast.makeText(
+                                        context,
+                                        "视频通话摄像头错误：$error",
+                                        Toast.LENGTH_LONG
+                                )
+                                .show()
+                    }
+            )
         }
         if (showConnectionDialog) {
             ConnectionConfigDialog(

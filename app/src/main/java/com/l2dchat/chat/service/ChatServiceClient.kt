@@ -231,6 +231,28 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         sendMediaFile("voice", file)
     }
 
+    /**
+     * Sends one video-call turn as a single multimodal Mai message.
+     *
+     * Keeping the camera keyframe and utterance in one message prevents MaiBot from replying to
+     * them as two independent user turns.
+     */
+    fun sendCallTurn(imageFile: File, voiceFile: File) {
+        sendCommand(
+                ChatServiceProtocol.MSG_SEND_CALL_TURN,
+                Bundle().apply {
+                    putString(
+                            ChatServiceProtocol.EXTRA_CALL_IMAGE_FILE_PATH,
+                            imageFile.absolutePath
+                    )
+                    putString(
+                            ChatServiceProtocol.EXTRA_CALL_VOICE_FILE_PATH,
+                            voiceFile.absolutePath
+                    )
+                }
+        )
+    }
+
     private fun sendMediaFile(type: String, file: File, requestId: String? = null) {
         require(type == "image" || type == "voice") { "Unsupported media type: $type" }
         sendCommand(

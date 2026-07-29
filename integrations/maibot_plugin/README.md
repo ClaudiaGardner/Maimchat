@@ -3,14 +3,21 @@
 这个目录是可直接复制进 MaiBot 1.x 的原生插件，不是独立 Adapter，也不包含
 Unity、Live2D 模型或其他角色资产。
 
-它向 MaiBot 暴露两个 LLM 工具：
+它向 MaiBot 暴露三个 LLM 工具：
 
 - `maimchat_avatar_intent`：发送与渲染器无关的情绪和动作意图。
 - `maimchat_camera_snapshot`：请求 Android 设备拍摄一张前置或后置摄像头照片。
+- `maimchat_speak`：视频通话中通过可配置 HTTP TTS 服务生成语音并发回设备扬声器。
 
 普通文字、语音和图片消息仍走 Maimchat 已有的 `maim_message` WebSocket 连接。
 拍照请求不会开启持续视频流；Android App 默认拒绝远程拍照，必须先由现场用户在
 “更多操作”中打开“允许 MaiBot 按需拍照”。
+
+Android 的视频通话模式会把一段自动分轮的语音和当前摄像头关键帧合并为一条
+多模态消息。消息会明确要求 MaiBot 简短口语回答并调用 `maimchat_speak`。
+TTS 接口默认是 `http://127.0.0.1:9881/v1/synthesize`，应接受 JSON
+`{"text":"...","language":"Chinese"}` 并直接返回 WAV；地址、音色和超时都可在
+插件配置的“设备能力”中修改。
 
 ## 版本要求
 

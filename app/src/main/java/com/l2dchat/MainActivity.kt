@@ -40,7 +40,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         enterImmersiveMode()
         ImprovedLive2DRenderer.ensureFrameworkInitialized()
-        setContent { L2DChatTheme { Live2DChatApp() } }
+        val debugOpenVideoCall =
+                BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_DEBUG_OPEN_VIDEO_CALL, false)
+        setContent { L2DChatTheme { Live2DChatApp(debugOpenVideoCall = debugOpenVideoCall) } }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -61,10 +63,14 @@ class MainActivity : ComponentActivity() {
         ImprovedLive2DRenderer.safeShutdownFramework()
         super.onDestroy()
     }
+
+    companion object {
+        private const val EXTRA_DEBUG_OPEN_VIDEO_CALL = "debug_open_video_call"
+    }
 }
 
 @Composable
-fun Live2DChatApp() {
+fun Live2DChatApp(debugOpenVideoCall: Boolean = false) {
     var currentScreen by remember { mutableStateOf(ChatAppScreen.ModelChat) }
     var selectedModel by remember { mutableStateOf<Live2DModelManager.ModelInfo?>(null) }
     var showModelSelection by remember { mutableStateOf(false) }
@@ -207,7 +213,8 @@ fun Live2DChatApp() {
                             persistModelSelection(newModel)
                             modelKey++
                         },
-                        onCheckForUpdates = { checkForUpdates(true) }
+                        onCheckForUpdates = { checkForUpdates(true) },
+                        debugOpenVideoCall = debugOpenVideoCall
                 )
     }
     if (showModelSelection) {

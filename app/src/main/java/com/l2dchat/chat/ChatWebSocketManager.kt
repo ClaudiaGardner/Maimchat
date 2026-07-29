@@ -31,6 +31,9 @@ class ChatWebSocketManager {
         private const val DEFAULT_PLATFORM = ChatPreferenceKeys.DEFAULT_PLATFORM
         private const val MAX_LOG_MESSAGE_CHARS = 512
         private const val DEVICE_REQUEST_MAX_AGE_MS = 30_000L
+        private const val VIDEO_CALL_TURN_INSTRUCTION =
+                "【正在视频通话：请结合当前画面和语音，用一到两句自然口语简短回答；" +
+                        "回复前请调用 maimchat_speak 播放同样内容。】"
     }
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
@@ -495,6 +498,34 @@ class ChatWebSocketManager {
 
     fun sendVoiceMessage(base64Wav: String) {
         sendMediaMessage("voice", base64Wav, "[语音]")
+    }
+
+    fun sendCallTurnMessage(base64Jpeg: String, base64Wav: String) {
+        require(base64Jpeg.isNotBlank()) { "通话画面不能为空" }
+        require(base64Wav.isNotBlank()) { "通话语音不能为空" }
+        val message =
+                buildStandardMessage(
+                        segments =
+                                listOf(
+                                        Seg("text", VIDEO_CALL_TURN_INSTRUCTION),
+                                        Seg("image", base64Jpeg),
+                                        Seg("voice", base64Wav)
+                                ),
+                        messageType = "call",
+                        additional =
+                                mapOf(
+                                        "call_mode" to true,
+                                        "vision_sampling" to "utterance"
+                                )
+                )
+        addMessage(
+                ChatMessage(
+                        id = requireNotNull(message.messageInfo.messageId),
+                        content = "[视频通话]",
+                        isFromUser = true
+                )
+        )
+        sendStandardMessage(message)
     }
 
     private fun sendMediaMessage(

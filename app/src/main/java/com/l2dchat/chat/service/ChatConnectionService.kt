@@ -363,6 +363,50 @@ class ChatConnectionService : Service() {
         }
     }
 
+    private fun handleSendCallTurn(data: Bundle) {
+        val imagePath = data.getString(ChatServiceProtocol.EXTRA_CALL_IMAGE_FILE_PATH)
+        val voicePath = data.getString(ChatServiceProtocol.EXTRA_CALL_VOICE_FILE_PATH)
+        if (imagePath.isNullOrBlank() || voicePath.isNullOrBlank()) {
+            notifyError("通话消息参数无效")
+            return
+        }
+        val imageFile = File(imagePath)
+        val voiceFile = File(voicePath)
+        if (manager.connectionState.value != ConnectionState.CONNECTED) {
+            ensureConnected()
+            imageFile.delete()
+            voiceFile.delete()
+            notifyError("尚未连接，无法发送通话消息")
+            return
+        }
+
+        serviceScope.launch {
+            try {
+                val (imagePayload, voicePayload) =
+                        withContext(Dispatchers.IO) {
+                            DeviceMediaPayloadEncoder.encode(
+                                    applicationContext,
+                                    "image",
+                                    imagePath
+                            ) to
+                                    DeviceMediaPayloadEncoder.encode(
+                                            applicationContext,
+                                            "voice",
+                                            voicePath
+                                    )
+                        }
+                manager.sendCallTurnMessage(imagePayload, voicePayload)
+            } catch (error: Throwable) {
+                notifyError("发送通话消息失败：${error.message ?: "未知错误"}")
+            } finally {
+                withContext(Dispatchers.IO) {
+                    imageFile.delete()
+                    voiceFile.delete()
+                }
+            }
+        }
+    }
+
     private fun handleSpeakerEnabled(data: Bundle) {
         speakerEnabled =
                 data.getBoolean(ChatServiceProtocol.EXTRA_SPEAKER_ENABLED, speakerEnabled)
@@ -509,6 +553,8 @@ class ChatConnectionService : Service() {
                         service.handleClearMessages(false)
                 ChatServiceProtocol.MSG_SET_ACTIVE_MODEL -> service.handleSetActiveModel(msg.data)
                 ChatServiceProtocol.MSG_SEND_MEDIA -> service.handleSendMedia(msg.data)
+                ChatServiceProtocol.MSG_SEND_CALL_TURN ->
+                        service.handleSendCallTurn(msg.data)
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED ->
                         service.handleSpeakerEnabled(msg.data)
                 else -> super.handleMessage(msg)
