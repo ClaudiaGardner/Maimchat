@@ -64,6 +64,7 @@ import com.l2dchat.live2d.Live2DViewTransform
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.media.DeviceAudioRecorder
+import com.l2dchat.media.DeviceVoiceActivityRecorder
 import com.l2dchat.ui.components.CameraCaptureDialog
 import com.l2dchat.preferences.ChatPreferenceKeys
 import com.l2dchat.ui.components.LogViewerDialog
@@ -87,6 +88,7 @@ private val ReservedBottomHeight = 84.dp
 private val LandscapeReservedBottomHeight = 64.dp
 // 顶部 AppBar 高度（防止模型头部被遮或越界），Material3 默认 56.dp
 private val TopBarHeight = 56.dp
+private const val PREF_HANDS_FREE_VOICE = "hands_free_voice_enabled"
 
 private data class ConnectionErrorBanner(val id: Long, val message: String)
 
@@ -162,6 +164,62 @@ fun ChatWithModelScreen(
     var suppressMissingUrlWarning by rememberSaveable { mutableStateOf(true) }
     var showCameraCapture by remember { mutableStateOf(false) }
     var isRecording by remember { mutableStateOf(false) }
+    var handsFreeVoiceEnabled by
+            rememberSaveable {
+                mutableStateOf(prefs.getBoolean(PREF_HANDS_FREE_VOICE, false))
+            }
+    var handsFreeVoiceState by
+            remember { mutableStateOf(DeviceVoiceActivityRecorder.State.STOPPED) }
+    var requestHandsFreeAfterPermission by remember { mutableStateOf(false) }
+
+    val voiceActivityRecorder =
+            remember(context, chatManager) {
+                DeviceVoiceActivityRecorder(
+                        context = context.applicationContext,
+                        onStateChanged = { newState ->
+                            scope.launch { handsFreeVoiceState = newState }
+                        },
+                        onUtteranceReady = { file ->
+                            scope.launch {
+                                if (chatManager.connectionState.value ==
+                                                ChatServiceClient.ChatConnectionState.CONNECTED
+                                ) {
+                                    chatManager.sendVoice(file)
+                                } else {
+                                    withContext(Dispatchers.IO) { file.delete() }
+                                }
+                            }
+                        },
+                        onError = { message ->
+                            scope.launch {
+                                handsFreeVoiceEnabled = false
+                                prefs.edit()
+                                        .putBoolean(PREF_HANDS_FREE_VOICE, false)
+                                        .apply()
+                                Toast.makeText(
+                                                context,
+                                                "免按键收音已停止：$message",
+                                                Toast.LENGTH_LONG
+                                        )
+                                        .show()
+                            }
+                        }
+                )
+            }
+
+    val setHandsFreeVoiceEnabled: (Boolean) -> Unit = { enabled ->
+        if (enabled && isRecording) {
+            scope.launch {
+                withContext(Dispatchers.IO) { audioRecorder.cancel() }
+                isRecording = false
+                handsFreeVoiceEnabled = true
+                prefs.edit().putBoolean(PREF_HANDS_FREE_VOICE, true).apply()
+            }
+        } else {
+            handsFreeVoiceEnabled = enabled
+            prefs.edit().putBoolean(PREF_HANDS_FREE_VOICE, enabled).apply()
+        }
+    }
 
     val beginMicrophoneRecording: () -> Unit = {
         scope.launch {
@@ -181,10 +239,15 @@ fun ChatWithModelScreen(
             rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
                     granted ->
                 if (granted) {
-                    beginMicrophoneRecording()
+                    if (requestHandsFreeAfterPermission) {
+                        setHandsFreeVoiceEnabled(true)
+                    } else {
+                        beginMicrophoneRecording()
+                    }
                 } else {
                     Toast.makeText(context, "需要麦克风权限才能发送语音", Toast.LENGTH_LONG).show()
                 }
+                requestHandsFreeAfterPermission = false
             }
     val cameraPermissionLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -217,6 +280,44 @@ fun ChatWithModelScreen(
 
     LaunchedEffect(lifecycleManager, isSpeaking) {
         lifecycleManager?.setLipSyncActive(isSpeaking)
+    }
+
+    LaunchedEffect(handsFreeVoiceEnabled) {
+        if (handsFreeVoiceEnabled) {
+            val result = withContext(Dispatchers.IO) { voiceActivityRecorder.start() }
+            result.onSuccess {
+                voiceActivityRecorder.setPaused(
+                        isSpeaking ||
+                                connectionState !=
+                                        ChatServiceClient.ChatConnectionState.CONNECTED
+                )
+            }.onFailure { error ->
+                handsFreeVoiceEnabled = false
+                prefs.edit().putBoolean(PREF_HANDS_FREE_VOICE, false).apply()
+                Toast.makeText(
+                                context,
+                                "无法开启免按键收音：${error.message ?: "未知错误"}",
+                                Toast.LENGTH_LONG
+                        )
+                        .show()
+            }
+        } else {
+            withContext(Dispatchers.IO) { voiceActivityRecorder.stop() }
+        }
+    }
+
+    LaunchedEffect(
+            handsFreeVoiceEnabled,
+            handsFreeVoiceState,
+            isSpeaking,
+            connectionState
+    ) {
+        if (handsFreeVoiceEnabled && voiceActivityRecorder.isRunning) {
+            voiceActivityRecorder.setPaused(
+                    isSpeaking ||
+                            connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
+            )
+        }
     }
 
     val cropLauncher =
@@ -333,6 +434,9 @@ fun ChatWithModelScreen(
 
     DisposableEffect(Unit) { onDispose { backgroundBitmap?.takeIf { !it.isRecycled }?.recycle() } }
     DisposableEffect(audioRecorder) { onDispose { audioRecorder.cancel() } }
+    DisposableEffect(voiceActivityRecorder) {
+        onDispose { voiceActivityRecorder.stop() }
+    }
 
     LaunchedEffect(currentModel) {
         val folder = currentModel?.folderPath
@@ -555,6 +659,43 @@ fun ChatWithModelScreen(
                                         onDismissRequest = { overflowExpanded = false }
                                 ) {
                                     DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                        if (handsFreeVoiceEnabled) {
+                                                            "关闭免按键收音"
+                                                        } else {
+                                                            "开启免按键收音"
+                                                        }
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                        Icons.Default.Mic,
+                                                        contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                if (handsFreeVoiceEnabled) {
+                                                    setHandsFreeVoiceEnabled(false)
+                                                } else if (!chatManager.hasUserNickname()) {
+                                                    showConnectionDialog = true
+                                                } else if (ContextCompat.checkSelfPermission(
+                                                                context,
+                                                                Manifest.permission.RECORD_AUDIO
+                                                        ) ==
+                                                        PackageManager.PERMISSION_GRANTED
+                                                ) {
+                                                    setHandsFreeVoiceEnabled(true)
+                                                } else {
+                                                    requestHandsFreeAfterPermission = true
+                                                    microphonePermissionLauncher.launch(
+                                                            Manifest.permission.RECORD_AUDIO
+                                                    )
+                                                }
+                                            }
+                                    )
+                                    DropdownMenuItem(
                                             text = { Text("查看日志") },
                                             onClick = {
                                                 overflowExpanded = false
@@ -697,9 +838,13 @@ fun ChatWithModelScreen(
                             }
                         },
                         isRecording = isRecording,
+                        handsFreeVoiceEnabled = handsFreeVoiceEnabled,
+                        handsFreeVoiceState = handsFreeVoiceState,
                         onMicrophone = {
                             if (!chatManager.hasUserNickname()) {
                                 showConnectionDialog = true
+                            } else if (handsFreeVoiceEnabled) {
+                                setHandsFreeVoiceEnabled(false)
                             } else if (isRecording) {
                                 isRecording = false
                                 scope.launch {
@@ -729,6 +874,7 @@ fun ChatWithModelScreen(
                             ) {
                                 beginMicrophoneRecording()
                             } else {
+                                requestHandsFreeAfterPermission = false
                                 microphonePermissionLauncher.launch(
                                         Manifest.permission.RECORD_AUDIO
                                 )
@@ -953,6 +1099,8 @@ private fun ChatInputBar(
         onSend: () -> Unit,
         onCamera: () -> Unit,
         isRecording: Boolean,
+        handsFreeVoiceEnabled: Boolean,
+        handsFreeVoiceState: DeviceVoiceActivityRecorder.State,
         onMicrophone: () -> Unit,
         speakerEnabled: Boolean,
         onSpeakerToggle: () -> Unit,
@@ -977,15 +1125,27 @@ private fun ChatInputBar(
             }
             IconButton(
                     onClick = onMicrophone,
-                    enabled = enabled,
+                    enabled = enabled || isRecording || handsFreeVoiceEnabled,
                     modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                         if (isRecording) Icons.Default.StopCircle else Icons.Default.Mic,
-                        contentDescription = if (isRecording) "停止并发送录音" else "开始录音",
+                        contentDescription =
+                                when {
+                                    isRecording -> "停止并发送录音"
+                                    handsFreeVoiceEnabled -> "关闭免按键收音"
+                                    else -> "开始录音"
+                                },
                         tint =
-                                if (isRecording) MaterialTheme.colorScheme.error
-                                else LocalContentColor.current
+                                when {
+                                    isRecording ||
+                                            handsFreeVoiceState ==
+                                                    DeviceVoiceActivityRecorder.State.SPEAKING ->
+                                            MaterialTheme.colorScheme.error
+                                    handsFreeVoiceEnabled ->
+                                            MaterialTheme.colorScheme.primary
+                                    else -> LocalContentColor.current
+                                }
                 )
             }
             IconButton(onClick = onSpeakerToggle, modifier = Modifier.size(40.dp)) {
@@ -1004,7 +1164,21 @@ private fun ChatInputBar(
                     onValueChange = onInputChange,
                     modifier = Modifier.weight(1f),
                     placeholder = {
-                        Text(if (isRecording) "录音中，再点麦克风发送…" else "输入消息…")
+                        Text(
+                                when {
+                                    isRecording -> "录音中，再点麦克风发送…"
+                                    handsFreeVoiceEnabled &&
+                                            handsFreeVoiceState ==
+                                                    DeviceVoiceActivityRecorder.State.SPEAKING ->
+                                            "检测到语音，正在自动收音…"
+                                    handsFreeVoiceEnabled &&
+                                            handsFreeVoiceState ==
+                                                    DeviceVoiceActivityRecorder.State.PAUSED ->
+                                            "免按键收音已暂停…"
+                                    handsFreeVoiceEnabled -> "免按键收音：正在聆听…"
+                                    else -> "输入消息…"
+                                }
+                        )
                     },
                     maxLines = 4,
                     enabled = enabled
