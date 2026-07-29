@@ -15,11 +15,16 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
         private const val MAX_MULTI_RATIO = 2.2f
         private const val MIN_MULTI_RATIO = 0.45f
         private const val MIN_DISTANCE_EPS = 5f
+        private const val TAP_TIMEOUT_MS = 280L
+        private const val DOUBLE_TAP_TIMEOUT_MS = 360L
+        private const val TAP_SLOP_PX = 96f
+        private const val DOUBLE_TAP_SLOP_PX = 144f
     }
     interface Callbacks {
         fun onSingleDown(x: Float, y: Float)
         fun onSingleMove(x: Float, y: Float)
         fun onSingleUp(x: Float, y: Float)
+        fun onDoubleTap(x: Float, y: Float) {}
         fun onMultiStart(x1: Float, y1: Float, x2: Float, y2: Float)
         fun onMultiMove(x1: Float, y1: Float, x2: Float, y2: Float)
         fun onMultiEnd()
@@ -42,6 +47,13 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
     private var lastMultiDistance = 0f
     private var lastMultiTime = 0L
     private var hasMultiHistory = false
+    private var tapCandidate = false
+    private var tapDownTime = 0L
+    private var tapDownX = 0f
+    private var tapDownY = 0f
+    private var lastTapTime = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
 
     fun onTouchEvent(event: MotionEvent): Boolean {
         Log.d(
@@ -63,12 +75,17 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
         primaryPointerId = event.getPointerId(0)
         secondaryPointerId = MotionEvent.INVALID_POINTER_ID
         isMultiTouch = false
+        tapCandidate = true
+        tapDownTime = SystemClock.uptimeMillis()
+        tapDownX = event.getX(0)
+        tapDownY = event.getY(0)
         Log.d(TAG, "primary DOWN id=$primaryPointerId x=${event.getX(0)} y=${event.getY(0)}")
         recordSingleState(SystemClock.uptimeMillis(), event.getX(0), event.getY(0))
         callbacks.onSingleDown(event.getX(0), event.getY(0))
     }
 
     private fun handlePointerDown(event: MotionEvent) {
+        tapCandidate = false
         val actionIndex = event.actionIndex
         val pointerId = event.getPointerId(actionIndex)
         if (pointerId == primaryPointerId || secondaryPointerId != MotionEvent.INVALID_POINTER_ID) {
@@ -139,6 +156,9 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
         if (primaryIndex != -1) {
             val x = event.getX(primaryIndex)
             val y = event.getY(primaryIndex)
+            if (hypot(x - tapDownX, y - tapDownY) > TAP_SLOP_PX) {
+                tapCandidate = false
+            }
             if (shouldIgnoreSingleMove(x, y)) {
                 return
             }
@@ -193,8 +213,33 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
 
     private fun handleActionUp(event: MotionEvent) {
         Log.d(TAG, "ACTION_UP id=${event.getPointerId(event.actionIndex)}")
-        callbacks.onSingleUp(event.getX(event.actionIndex), event.getY(event.actionIndex))
+        val x = event.getX(event.actionIndex)
+        val y = event.getY(event.actionIndex)
+        val now = SystemClock.uptimeMillis()
+        callbacks.onSingleUp(x, y)
+        if (tapCandidate &&
+                        now - tapDownTime <= TAP_TIMEOUT_MS &&
+                        hypot(x - tapDownX, y - tapDownY) <= TAP_SLOP_PX
+        ) {
+            dispatchTap(now, x, y)
+        }
         reset()
+    }
+
+    private fun dispatchTap(time: Long, x: Float, y: Float) {
+        val isDoubleTap =
+                lastTapTime > 0L &&
+                        time - lastTapTime <= DOUBLE_TAP_TIMEOUT_MS &&
+                        hypot(x - lastTapX, y - lastTapY) <= DOUBLE_TAP_SLOP_PX
+        if (isDoubleTap) {
+            Log.d(TAG, "double TAP x=$x y=$y")
+            lastTapTime = 0L
+            callbacks.onDoubleTap(x, y)
+        } else {
+            lastTapTime = time
+            lastTapX = x
+            lastTapY = y
+        }
     }
 
     private fun ensurePrimaryIndex(event: MotionEvent): Int {
@@ -211,6 +256,7 @@ class Live2DGestureDispatcher(private val callbacks: Callbacks) {
         dispatchMultiEnd()
         hasSingleHistory = false
         hasMultiHistory = false
+        tapCandidate = false
     }
 
     private fun dispatchMultiEnd() {

@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -26,7 +26,7 @@ fun WallpaperSettingsDialog(
 ) {
         AlertDialog(
                 onDismissRequest = onDismiss,
-                title = { Text("桌面壁纸配置") },
+                title = { Text("显示背景") },
                 text = {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Text(text = "当前背景文件:", style = MaterialTheme.typography.bodyMedium)
@@ -45,13 +45,13 @@ fun WallpaperSettingsDialog(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.secondary
                                 )
-                                Divider()
+                                HorizontalDivider()
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         Button(onClick = onPickImage) { Text("选择图片") }
                                         Button(onClick = onClearImage) { Text("清除") }
                                 }
                                 Text(
-                                        text = "支持常见图片格式，建议 16:9 或 9:16，过大的图片会自动压缩到 2048px 以内。",
+                                        text = "支持常见图片格式，可自由裁剪；横竖屏切换时背景会自动居中裁切，过大的图片会压缩到 2048px 以内。",
                                         style = MaterialTheme.typography.bodySmall
                                 )
                         }

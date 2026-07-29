@@ -48,6 +48,34 @@ public class LAppView implements AutoCloseable {
         transformContextKey = (key == null || key.isEmpty()) ? "default" : key;
     }
 
+    public void setViewTransform(float scale, float translationX, float translationY) {
+        float[] matrix = {
+                scale, 0.0f, 0.0f, 0.0f,
+                0.0f, scale, 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f, 0.0f,
+                translationX, translationY, 0.0f, 1.0f
+        };
+        viewMatrix.setMatrix(matrix);
+        notifyViewMatrixChanged();
+    }
+
+    public void resetViewTransform() {
+        setViewTransform(Scale.DEFAULT.getValue(), 0.0f, 0.0f);
+    }
+
+    public void translateViewByDeviceDelta(float deltaX, float deltaY) {
+        if (!shouldApplyTranslation(deltaX, deltaY)) {
+            return;
+        }
+        float screenDeltaX = deltaX * deviceToScreen.getScaleX();
+        float screenDeltaY = deltaY * deviceToScreen.getScaleY();
+        if (!isFinite(screenDeltaX) || !isFinite(screenDeltaY)) {
+            return;
+        }
+        viewMatrix.adjustTranslate(screenDeltaX, screenDeltaY);
+        notifyViewMatrixChanged();
+    }
+
     @Override
     public void close() {
         spriteShader.close();

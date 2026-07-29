@@ -1,6 +1,7 @@
 package com.l2dchat.live2d
 
 import android.content.Context
+import android.content.res.Configuration
 import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
@@ -35,8 +36,14 @@ private constructor(
         private val modelInfo: Live2DModelManager.ModelInfo
 ) {
     private val backgroundPathRef = AtomicReference<String?>(null)
+    private val transformContextKey =
+            buildTransformContextKey(
+                    modelInfo.folderPath,
+                    context.resources.configuration.orientation
+            )
 
     init {
+        Live2DViewTransformStore.initialize(context)
         val persisted = Live2DBackgroundTextureHelper.loadPersistedBackgroundPath(context)
         if (!persisted.isNullOrBlank()) {
             backgroundPathRef.set(persisted)
@@ -106,6 +113,16 @@ private constructor(
                 }
             }
         }
+
+        internal fun buildTransformContextKey(modelPath: String, orientation: Int): String {
+            val orientationName =
+                    if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                        "landscape"
+                    } else {
+                        "portrait"
+                    }
+            return "app:$orientationName:$modelPath"
+        }
     }
 
     private var instanceId: Int = 0
@@ -135,6 +152,24 @@ private constructor(
 
     private var renderer: ModelRenderer? = null
     private var glSurfaceView: GLSurfaceView? = null
+    private val isGestureAdjustmentMode = AtomicBoolean(false)
+    private var adjustmentModeCallback: ((Boolean) -> Unit)? = null
+    private var lastAdjustmentTouchX = Float.NaN
+    private var lastAdjustmentTouchY = Float.NaN
+
+    fun setAdjustmentModeCallback(callback: ((Boolean) -> Unit)?) {
+        adjustmentModeCallback = callback
+        callback?.invoke(isGestureAdjustmentMode.get())
+    }
+
+    private fun toggleGestureAdjustmentMode() {
+        val enabled = !isGestureAdjustmentMode.get()
+        isGestureAdjustmentMode.set(enabled)
+        lastAdjustmentTouchX = Float.NaN
+        lastAdjustmentTouchY = Float.NaN
+        adjustmentModeCallback?.invoke(enabled)
+        Log.d(TAG, "模型手势调整模式: ${if (enabled) "开启" else "关闭"}")
+    }
 
     fun setStateCallback(cb: StateCallback) {
         stateCallback = cb
@@ -157,7 +192,14 @@ private constructor(
                 notifyError("模型验证失败: ${validation.issues.joinToString()}", null)
                 return false
             }
-            renderer = ModelRenderer(context, modelInfo, this, instanceId)
+            renderer =
+                    ModelRenderer(
+                            context,
+                            modelInfo,
+                            this,
+                            instanceId,
+                            transformContextKey
+                    )
             isInstanceInitialized.set(true)
             setState(LifecycleState.INITIALIZED, "初始化完成")
             true
@@ -198,15 +240,44 @@ private constructor(
                                         object : Live2DGestureDispatcher.Callbacks {
                                             override fun onSingleDown(x: Float, y: Float) {
                                                 Log.d(gestureLogTag, "singleDown x=$x y=$y")
-                                                LAppDelegate.getInstance().onTouchBegan(x, y)
+                                                if (isGestureAdjustmentMode.get()) {
+                                                    lastAdjustmentTouchX = x
+                                                    lastAdjustmentTouchY = y
+                                                } else {
+                                                    LAppDelegate.getInstance().onTouchBegan(x, y)
+                                                }
                                             }
                                             override fun onSingleMove(x: Float, y: Float) {
                                                 Log.v(gestureLogTag, "singleMove x=$x y=$y")
-                                                LAppDelegate.getInstance().onTouchMoved(x, y)
+                                                if (isGestureAdjustmentMode.get()) {
+                                                    if (lastAdjustmentTouchX.isFinite() &&
+                                                                    lastAdjustmentTouchY.isFinite()
+                                                    ) {
+                                                        LAppDelegate.getInstance()
+                                                                .view
+                                                                ?.translateViewByDeviceDelta(
+                                                                        x - lastAdjustmentTouchX,
+                                                                        y - lastAdjustmentTouchY
+                                                                )
+                                                    }
+                                                    lastAdjustmentTouchX = x
+                                                    lastAdjustmentTouchY = y
+                                                } else {
+                                                    LAppDelegate.getInstance().onTouchMoved(x, y)
+                                                }
                                             }
                                             override fun onSingleUp(x: Float, y: Float) {
                                                 Log.d(gestureLogTag, "singleUp x=$x y=$y")
-                                                LAppDelegate.getInstance().onTouchEnd(x, y)
+                                                if (isGestureAdjustmentMode.get()) {
+                                                    lastAdjustmentTouchX = Float.NaN
+                                                    lastAdjustmentTouchY = Float.NaN
+                                                } else {
+                                                    LAppDelegate.getInstance().onTouchEnd(x, y)
+                                                }
+                                            }
+                                            override fun onDoubleTap(x: Float, y: Float) {
+                                                Log.d(gestureLogTag, "doubleTap x=$x y=$y")
+                                                toggleGestureAdjustmentMode()
                                             }
                                             override fun onMultiStart(
                                                     x1: Float,
@@ -218,8 +289,10 @@ private constructor(
                                                         gestureLogTag,
                                                         "multiStart p1=($x1,$y1) p2=($x2,$y2)"
                                                 )
-                                                LAppDelegate.getInstance()
-                                                        .onMultiTouchBegan(x1, y1, x2, y2)
+                                                if (isGestureAdjustmentMode.get()) {
+                                                    LAppDelegate.getInstance()
+                                                            .onMultiTouchBegan(x1, y1, x2, y2)
+                                                }
                                             }
                                             override fun onMultiMove(
                                                     x1: Float,
@@ -231,8 +304,10 @@ private constructor(
                                                         gestureLogTag,
                                                         "multiMove p1=($x1,$y1) p2=($x2,$y2)"
                                                 )
-                                                LAppDelegate.getInstance()
-                                                        .onMultiTouchMoved(x1, y1, x2, y2)
+                                                if (isGestureAdjustmentMode.get()) {
+                                                    LAppDelegate.getInstance()
+                                                            .onMultiTouchMoved(x1, y1, x2, y2)
+                                                }
                                             }
                                             override fun onMultiEnd() {
                                                 Log.d(gestureLogTag, "multiEnd")
@@ -273,6 +348,9 @@ private constructor(
             renderer?.cleanup()
             renderer = null
             glSurfaceView = null
+            isGestureAdjustmentMode.set(false)
+            adjustmentModeCallback?.invoke(false)
+            adjustmentModeCallback = null
             backgroundPathRef.set(null)
             performGlobalReset()
             isInstanceInitialized.set(false)
@@ -311,6 +389,33 @@ private constructor(
             Log.d(TAG, "updateBackgroundTexture: 进入GL线程 path=$path")
             applyBackgroundTextureOnGlThread(path)
         }
+    }
+
+    fun getViewTransform(): Live2DViewTransform =
+            Live2DViewTransformStore.getTransform(transformContextKey)
+
+    fun updateViewTransform(transform: Live2DViewTransform): Live2DViewTransform {
+        val sanitized =
+                Live2DViewTransformStore.saveTransform(transformContextKey, transform)
+        glSurfaceView?.queueEvent {
+            LAppDelegate.getInstance()
+                    ?.view
+                    ?.setViewTransform(
+                            sanitized.scale,
+                            sanitized.offsetX,
+                            sanitized.offsetY
+                    )
+        }
+        return sanitized
+    }
+
+    fun resetViewTransform(): Live2DViewTransform {
+        Live2DViewTransformStore.clear(transformContextKey)
+        val defaultTransform = Live2DViewTransform()
+        glSurfaceView?.queueEvent {
+            LAppDelegate.getInstance()?.view?.resetViewTransform()
+        }
+        return defaultTransform
     }
 
     private fun applyBackgroundTextureOnGlThread(path: String?) {
@@ -807,15 +912,14 @@ private constructor(
             private val context: Context,
             private val modelInfo: Live2DModelManager.ModelInfo,
             private val lifecycle: Live2DModelLifecycleManager,
-            private val instanceId: Int
+            private val instanceId: Int,
+            private val transformContextKey: String
     ) : GLSurfaceView.Renderer {
         private var delegate: LAppDelegate? = null
         private var live2DManager: LAppLive2DManager? = null
         private var isSetup = false
         private var frameCount = 0L
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-        private val transformContextKey = "app-$instanceId"
-
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             try {
                 Log.d(TAG, "onSurfaceCreated #$instanceId : ${modelInfo.name}")

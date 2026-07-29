@@ -5,6 +5,7 @@ import android.app.WallpaperManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -50,6 +52,7 @@ import com.l2dchat.chat.service.ChatServiceClient
 import com.l2dchat.live2d.ImprovedLive2DRenderer
 import com.l2dchat.live2d.Live2DModelLifecycleManager
 import com.l2dchat.live2d.Live2DModelManager
+import com.l2dchat.live2d.Live2DViewTransform
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.preferences.ChatPreferenceKeys
@@ -71,6 +74,7 @@ import kotlinx.coroutines.withContext
 // 固定保留给输入区域的空白高度（模型不绘制到此区域之下）
 // 原为 120.dp，按需求缩小约 30% -> 84.dp
 private val ReservedBottomHeight = 84.dp
+private val LandscapeReservedBottomHeight = 64.dp
 // 顶部 AppBar 高度（防止模型头部被遮或越界），Material3 默认 56.dp
 private val TopBarHeight = 56.dp
 
@@ -89,6 +93,16 @@ fun ChatWithModelScreen(
         onCheckForUpdates: () -> Unit
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val orientationLabel =
+            if (isLandscape) {
+                "横屏"
+            } else {
+                "竖屏"
+            }
+    val reservedBottomHeight =
+            if (isLandscape) LandscapeReservedBottomHeight else ReservedBottomHeight
     val scope = rememberCoroutineScope()
 
     val connectionState by chatManager.connectionState.collectAsState()
@@ -123,6 +137,7 @@ fun ChatWithModelScreen(
     var wallpaperBgPath by rememberSaveable { mutableStateOf(persistedWallpaperPath.orEmpty()) }
     var wallpaperTempPath by rememberSaveable { mutableStateOf(persistedWallpaperPath.orEmpty()) }
     var showWallpaperDialog by remember { mutableStateOf(false) }
+    var showModelTransformDialog by remember { mutableStateOf(false) }
     var showLogViewer by remember { mutableStateOf(false) }
     var backgroundBitmap by remember { mutableStateOf<Bitmap?>(null) }
     // 可选平台字段（不填写则使用默认）
@@ -139,6 +154,18 @@ fun ChatWithModelScreen(
     var lifecycleManager by
             remember(modelKey) { mutableStateOf<Live2DModelLifecycleManager?>(null) }
     var resetCounter by remember(modelKey) { mutableStateOf(0) }
+    var modelTransform by
+            remember(currentModel?.folderPath, configuration.orientation) {
+                mutableStateOf(Live2DViewTransform())
+            }
+    var initialModelTransform by
+            remember(currentModel?.folderPath, configuration.orientation) {
+                mutableStateOf(Live2DViewTransform())
+            }
+    var isGestureAdjustmentMode by
+            remember(currentModel?.folderPath, configuration.orientation) {
+                mutableStateOf(false)
+            }
 
     val cropLauncher =
             rememberLauncherForActivityResult(StartActivityForResult()) { result ->
@@ -178,15 +205,11 @@ fun ChatWithModelScreen(
                                 setCompressionQuality(95)
                                 setHideBottomControls(false)
                                 setFreeStyleCropEnabled(true)
-                            }
+                    }
                     try {
-                        val metrics = context.resources.displayMetrics
-                        val aspectX = metrics.widthPixels.coerceAtLeast(1)
-                        val aspectY = metrics.heightPixels.coerceAtLeast(1)
                         val intent =
                                 UCrop.of(uri, destUri)
                                         .withOptions(options)
-                                        .withAspectRatio(aspectX.toFloat(), aspectY.toFloat())
                                         .withMaxResultSize(2048, 2048)
                                         .getIntent(context)
                                         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -305,6 +328,7 @@ fun ChatWithModelScreen(
     LaunchedEffect(currentModel, modelKey) {
         if (currentModel != null) {
             isResetting = true
+            isGestureAdjustmentMode = false
             try {
                 lifecycleManager?.destroy()
                 lifecycleManager = null
@@ -321,6 +345,9 @@ fun ChatWithModelScreen(
                         }
                 )
                 if (newManager.initialize()) {
+                    newManager.setAdjustmentModeCallback { enabled ->
+                        isGestureAdjustmentMode = enabled
+                    }
                     lifecycleManager = newManager
                     chatManager.setMotionTriggerCallback { group, index, loop ->
                         newManager.playMotionByGroup(group, index, loop)
@@ -338,7 +365,7 @@ fun ChatWithModelScreen(
     DisposableEffect(modelKey) { onDispose { lifecycleManager?.destroy() } }
 
     val chatInputHeightDp = with(LocalDensity.current) { chatInputHeightPx.toDp() }
-    val floatingBottomPadding = maxOf(ReservedBottomHeight, chatInputHeightDp) + 8.dp
+    val floatingBottomPadding = maxOf(reservedBottomHeight, chatInputHeightDp) + 8.dp
 
     Box(modifier = Modifier.fillMaxSize()) {
         backgroundBitmap?.let { bmp ->
@@ -392,7 +419,7 @@ fun ChatWithModelScreen(
                         )
                     }
                     // 固定空白区域，不随输入框/键盘变化
-                    Spacer(modifier = Modifier.fillMaxWidth().height(ReservedBottomHeight))
+                    Spacer(modifier = Modifier.fillMaxWidth().height(reservedBottomHeight))
                 }
 
                 // 顶部栏浮层
@@ -414,8 +441,13 @@ fun ChatWithModelScreen(
                             }
                         },
                         actions = {
-                            IconButton(onClick = { applyLiveWallpaper(context) }) {
-                                Icon(Icons.Default.Wallpaper, contentDescription = "应用为系统壁纸")
+                            if (isLandscape) {
+                                IconButton(onClick = { applyLiveWallpaper(context) }) {
+                                    Icon(
+                                            Icons.Default.Wallpaper,
+                                            contentDescription = "应用为系统壁纸"
+                                    )
+                                }
                             }
                             IconButton(
                                     onClick = {
@@ -483,6 +515,27 @@ fun ChatWithModelScreen(
                                                 onModelSelectionRequest()
                                             }
                                     )
+                                    if (!isLandscape) {
+                                        DropdownMenuItem(
+                                                text = { Text("应用为系统动态壁纸") },
+                                                onClick = {
+                                                    overflowExpanded = false
+                                                    applyLiveWallpaper(context)
+                                                }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                            text = { Text("精确调整模型位置与大小") },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                val currentTransform =
+                                                        lifecycleManager?.getViewTransform()
+                                                                ?: Live2DViewTransform()
+                                                modelTransform = currentTransform
+                                                initialModelTransform = currentTransform
+                                                showModelTransformDialog = true
+                                            }
+                                    )
                                     DropdownMenuItem(
                                             text = { Text("清空聊天记录") },
                                             onClick = {
@@ -502,6 +555,24 @@ fun ChatWithModelScreen(
                         },
                         modifier = Modifier.align(Alignment.TopCenter)
                 )
+
+                if (isGestureAdjustmentMode) {
+                    Surface(
+                            modifier =
+                                    Modifier.align(Alignment.TopCenter)
+                                            .padding(top = TopBarHeight + 8.dp),
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.94f),
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            tonalElevation = 6.dp
+                    ) {
+                        Text(
+                                text = "调整模式：拖动位置 · 双指缩放 · 双击完成",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
 
                 if (connectionErrorBanners.isNotEmpty()) {
                     Column(
@@ -534,6 +605,7 @@ fun ChatWithModelScreen(
                         recentMessages = messages,
                         standardMessages = standardMessages,
                         userNickname = currentUserNickname,
+                        maxVisibleMessages = if (isLandscape) 2 else 5,
                         modifier =
                                 Modifier.align(Alignment.BottomStart)
                                         .padding(start = 12.dp, bottom = floatingBottomPadding)
@@ -719,6 +791,27 @@ fun ChatWithModelScreen(
                     }
             )
         }
+        if (showModelTransformDialog) {
+            ModelTransformSettingsDialog(
+                    transform = modelTransform,
+                    orientationLabel = orientationLabel,
+                    onTransformChange = { requested ->
+                        modelTransform =
+                                lifecycleManager?.updateViewTransform(requested) ?: requested
+                    },
+                    onReset = {
+                        modelTransform =
+                                lifecycleManager?.resetViewTransform()
+                                        ?: Live2DViewTransform()
+                    },
+                    onApply = { showModelTransformDialog = false },
+                    onDismiss = {
+                        lifecycleManager?.updateViewTransform(initialModelTransform)
+                        modelTransform = initialModelTransform
+                        showModelTransformDialog = false
+                    }
+            )
+        }
     }
 }
 
@@ -867,10 +960,12 @@ private fun FloatingMessagesOverlay(
         recentMessages: List<ChatServiceClient.ChatMessageSnapshot>,
         standardMessages: List<MessageBase>,
         userNickname: String?,
+        maxVisibleMessages: Int,
         modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
-    val tail = remember(recentMessages) { recentMessages.takeLast(5) }
+    val visibleCount = maxVisibleMessages.coerceAtLeast(1)
+    val tail = remember(recentMessages, visibleCount) { recentMessages.takeLast(visibleCount) }
     val senderNameById =
             remember(standardMessages) {
                 val m = mutableMapOf<String, String>()
@@ -892,7 +987,7 @@ private fun FloatingMessagesOverlay(
         tail.forEachIndexed { index, msg ->
             if ((hiddenMap[msg.id] ?: false)) return@forEachIndexed
             val animAlpha = remember(msg.id) { Animatable(1f) }
-            val shouldFadeOut = tail.size >= 5 && index == 0
+            val shouldFadeOut = tail.size >= visibleCount && index == 0
             Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement =

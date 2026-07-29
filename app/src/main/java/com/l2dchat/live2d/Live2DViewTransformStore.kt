@@ -7,6 +7,49 @@ import com.live2d.sdk.cubism.framework.math.CubismViewMatrix
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class Live2DViewTransform(
+        val scale: Float = DEFAULT_SCALE,
+        val offsetX: Float = 0f,
+        val offsetY: Float = 0f
+) {
+    internal fun toMatrix(): FloatArray =
+            floatArrayOf(
+                    scale,
+                    0f,
+                    0f,
+                    0f,
+                    0f,
+                    scale,
+                    0f,
+                    0f,
+                    0f,
+                    0f,
+                    1f,
+                    0f,
+                    offsetX,
+                    offsetY,
+                    0f,
+                    1f
+            )
+
+    companion object {
+        const val DEFAULT_SCALE = 1f
+        const val MIN_SCALE = 0.8f
+        const val MAX_SCALE = 6f
+        const val MIN_OFFSET = -2.2f
+        const val MAX_OFFSET = 2.2f
+
+        internal fun fromMatrix(matrix: FloatArray?): Live2DViewTransform {
+            if (matrix == null || matrix.size != 16) return Live2DViewTransform()
+            return Live2DViewTransform(
+                    scale = matrix[0],
+                    offsetX = matrix[12],
+                    offsetY = matrix[13]
+            )
+        }
+    }
+}
+
 /** 保存并区分不同上下文（如应用与壁纸）的视图矩阵状态，支持双指拖动/缩放独立生效，并持久化存储。 */
 object Live2DViewTransformStore {
     private const val MATRIX_SIZE = 16
@@ -99,6 +142,17 @@ object Live2DViewTransformStore {
         val snapshot = FloatArray(MATRIX_SIZE)
         System.arraycopy(stored, 0, snapshot, 0, MATRIX_SIZE)
         return snapshot
+    }
+
+    fun getTransform(key: String?): Live2DViewTransform =
+            Live2DViewTransform.fromMatrix(getMatrixCopy(key))
+
+    fun saveTransform(key: String?, transform: Live2DViewTransform): Live2DViewTransform {
+        val safeKey = sanitizeKey(key)
+        val sanitized =
+                Live2DMatrixValidator.sanitizeSnapshot(transform.toMatrix(), safeKey).array
+        saveFrom(safeKey, sanitized)
+        return Live2DViewTransform.fromMatrix(sanitized)
     }
 
     fun clear(key: String?) {

@@ -17,6 +17,7 @@ tcmofashi: 本项目纯纯的vibe coding，还请见谅
 
 - **Live2D 渲染集成**：内置 Cubism Framework，支持多模型加载、动作／表情播放与渲染生命周期管理。
 - **Compose 聊天界面**：使用 Jetpack Compose 构建消息流、输入框、模型状态提示等 UI 组件，并自动记忆上次连接配置。
+- **横竖屏显示设置**：App 使用设备传感器自动跟随方向，可更换并自由裁剪背景；双击模型后可拖动位置、双指缩放，也可通过设置面板精确调整，并按模型、屏幕方向分别保存。
 - **标准化 WebSocket 协议**：对接新的 `sender_info` / `receiver_info` 消息格式，可发送文本、表情、语音段，支持 Platform Header 与 Bearer Token。
 - **桌面扩展能力**：提供动态壁纸 `Live2DWallpaperService` 以及桌面小组件 `Live2DChatWidgetProvider` 骨架，演示消息气泡同步、手势交互。
 - **可扩展的配置存储**：将连接、用户、模型偏好写入 `SharedPreferences`，实现自动重连与多端共享。

@@ -24,7 +24,7 @@ public class LAppDefine {
         /**
          * Maximum scaling rate
          */
-        MAX(2.0f),
+        MAX(6.0f),
         /**
          * Minimum scaling rate
          */
