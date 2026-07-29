@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
+import androidx.core.content.ContextCompat
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.CallRuntimePhase
@@ -148,6 +149,13 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     fun bindService() {
         if (isBound) return
         val intent = Intent(appContext, ChatConnectionService::class.java)
+        runCatching { ContextCompat.startForegroundService(appContext, intent) }
+                .onFailure { error ->
+                    logger.warn(
+                            "Unable to start persistent chat service; continuing with bound service: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                    )
+                }
         isBound = appContext.bindService(intent, this, Context.BIND_AUTO_CREATE)
         if (!isBound) {
             logger.error("bindService failed")

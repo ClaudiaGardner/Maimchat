@@ -1,7 +1,15 @@
 package com.l2dchat.chat.service
 
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -10,6 +18,10 @@ import android.os.Message
 import android.os.Messenger
 import android.os.Process
 import android.os.RemoteException
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import com.l2dchat.MainActivity
+import com.l2dchat.R
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.CallAudioPayload
@@ -92,6 +104,7 @@ class ChatConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        promoteToForeground()
         manager = ChatWebSocketManager()
         audioPlayer =
                 DeviceAudioPlayer(
@@ -177,6 +190,7 @@ class ChatConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // 保持粘性，便于在进程被系统回收后自动重启
+        promoteToForeground()
         return START_STICKY
     }
 
@@ -193,6 +207,107 @@ class ChatConnectionService : Service() {
         systemTtsPlayer.shutdown()
         realtimeClient.release()
         manager.disconnect()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun promoteToForeground() {
+        val notification = buildForegroundNotification()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+            return
+        }
+
+        var serviceTypes = 0
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            serviceTypes =
+                    serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+        }
+        if (callModeActive &&
+                        callMicrophoneEnabled &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                                PackageManager.PERMISSION_GRANTED
+        ) {
+            serviceTypes = serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        if (callModeActive &&
+                        callVideoEnabled &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                                PackageManager.PERMISSION_GRANTED
+        ) {
+            serviceTypes = serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+
+        runCatching {
+                    if (serviceTypes == 0) {
+                        startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+                    } else {
+                        startForeground(FOREGROUND_NOTIFICATION_ID, notification, serviceTypes)
+                    }
+                }
+                .onFailure { error ->
+                    logger.warn(
+                            "前台服务类型更新失败，保留基础前台服务：" +
+                                    (error.message ?: error.javaClass.simpleName)
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        startForeground(
+                                FOREGROUND_NOTIFICATION_ID,
+                                notification,
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                        )
+                    } else {
+                        startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+                    }
+                }
+    }
+
+    private fun buildForegroundNotification(): Notification {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notificationManager.createNotificationChannel(
+                    NotificationChannel(
+                                    FOREGROUND_CHANNEL_ID,
+                                    "Maimchat 实时连接",
+                                    NotificationManager.IMPORTANCE_LOW
+                            )
+                            .apply {
+                                description = "保持角色对话、麦克风和视频会话在线"
+                                setShowBadge(false)
+                            }
+            )
+        }
+        val openAppIntent =
+                Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                }
+        val contentIntent =
+                PendingIntent.getActivity(
+                        this,
+                        0,
+                        openAppIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+        val detail =
+                callStateDetail
+                        ?: when {
+                            callModeActive -> "实时对话正在运行"
+                            else -> "角色连接正在后台运行"
+                        }
+        return NotificationCompat.Builder(this, FOREGROUND_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("Maimchat 正在运行")
+                .setContentText(detail)
+                .setContentIntent(contentIntent)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .build()
+    }
+
+    private fun updateForegroundNotification() {
+        getSystemService(NotificationManager::class.java)
+                .notify(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification())
     }
 
     private fun restoreModelName(): String? {
@@ -221,7 +336,17 @@ class ChatConnectionService : Service() {
 
     private fun startObservers() {
         serviceScope.launch {
-            manager.connectionState.collect { state -> broadcastConnectionState(state) }
+            manager.connectionState.collect { state ->
+                broadcastConnectionState(state)
+                if (state == ConnectionState.CONNECTED &&
+                                callModeActive &&
+                                callBackendMode == CallBackendMode.REALTIME &&
+                                !realtimeSessionActive &&
+                                pendingRealtimeSessionRequestId == null
+                ) {
+                    requestRealtimeSession()
+                }
+            }
         }
         serviceScope.launch {
             var lastBroadcastId: String? = null
@@ -542,6 +667,7 @@ class ChatConnectionService : Service() {
                 "通话状态=$phase turn=${pendingTurnId ?: "-"} " +
                         "tts=${pendingTtsRequestId ?: "-"} detail=${detail ?: "-"}"
         )
+        updateForegroundNotification()
         broadcastCallState()
     }
 
@@ -862,6 +988,7 @@ class ChatConnectionService : Service() {
         callModeActive = active
         callVideoEnabled = active && video
         callMicrophoneEnabled = active && microphoneEnabled
+        promoteToForeground()
         realtimeClient.setInputEnabled(callMicrophoneEnabled)
         if (active) {
             if (callBackendMode == CallBackendMode.REALTIME) {
@@ -898,7 +1025,7 @@ class ChatConnectionService : Service() {
         if (!callModeActive || callBackendMode != CallBackendMode.REALTIME) return
         if (manager.connectionState.value != ConnectionState.CONNECTED) {
             ensureConnected()
-            fallbackFromRealtime("MaiBot 尚未连接，无法获取端到端会话授权")
+            updateCallState(CallRuntimePhase.THINKING, "正在连接 MaiBot 以获取端到端会话")
             return
         }
         val requestId = "realtime-${UUID.randomUUID()}"
@@ -1179,5 +1306,7 @@ class ChatConnectionService : Service() {
         private const val REALTIME_SESSION_TIMEOUT_MS = 15_000L
         private const val SYSTEM_TTS_READY_RETRIES = 20
         private const val SYSTEM_TTS_RETRY_DELAY_MS = 100L
+        private const val FOREGROUND_CHANNEL_ID = "maimchat_persistent_connection"
+        private const val FOREGROUND_NOTIFICATION_ID = 4102
     }
 }
