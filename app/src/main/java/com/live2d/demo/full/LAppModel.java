@@ -178,9 +178,9 @@ public class LAppModel extends CubismUserModel {
         }
 
         // Lip Sync Setting
-        if (lipSync) {
+        if (lipSync || externalLipSyncEnabled) {
             // リ���ルタイムでリップシンクを行う場合、システムから音量を取得して0~1の範囲で値を入力します
-            float value = 0.0f;
+            float value = externalLipSyncEnabled ? externalLipSyncValue : 0.0f;
 
             for (int i = 0; i < lipSyncIds.size(); i++) {
                 CubismId lipSyncId = lipSyncIds.get(i);
@@ -467,6 +467,47 @@ public class LAppModel extends CubismUserModel {
     }
 
     /**
+     * Supplies a mouth-open value from an external audio player.
+     *
+     * @param enabled whether the external lip-sync override is active
+     * @param value mouth-open amount in the range 0..1
+     */
+    public void setExternalLipSync(boolean enabled, float value) {
+        externalLipSyncEnabled = enabled;
+        externalLipSyncValue = Math.max(0.0f, Math.min(1.0f, value));
+    }
+
+    public String resolveExpressionName(String candidate) {
+        if (candidate == null) {
+            return null;
+        }
+        for (String name : expressions.keySet()) {
+            if (name.equalsIgnoreCase(candidate)) {
+                return name;
+            }
+        }
+        return null;
+    }
+
+    public String resolveMotionGroupName(String candidate) {
+        if (candidate == null || modelSetting == null) {
+            return null;
+        }
+        int count = modelSetting.getMotionGroupCount();
+        for (int i = 0; i < count; i++) {
+            String name = modelSetting.getMotionGroupName(i);
+            if (name != null && name.equalsIgnoreCase(candidate)) {
+                return name;
+            }
+        }
+        return null;
+    }
+
+    public int getMotionCountForGroup(String group) {
+        return modelSetting == null || group == null ? 0 : modelSetting.getMotionCount(group);
+    }
+
+    /**
      * ランダムに選ばれた表情モーションを設定する
      */
     public void setRandomExpression() {
@@ -747,6 +788,8 @@ public class LAppModel extends CubismUserModel {
      * モデルに設定されたリップシンク機能用パラメーターID
      */
     private final List<CubismId> lipSyncIds = new ArrayList<CubismId>();
+    private volatile boolean externalLipSyncEnabled = false;
+    private volatile float externalLipSyncValue = 0.0f;
     /**
      * 読み込まれているモーションのマップ
      */

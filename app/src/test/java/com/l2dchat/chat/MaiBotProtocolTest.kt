@@ -201,4 +201,104 @@ class MaiBotProtocolTest {
                 (result as Live2DChatMessageHandler.ChatMessageResult.Success).message.content
         )
     }
+
+    @Test
+    fun parsesAmaidesuStyleAvatarIntentSegment() {
+        val message =
+                MessageBase(
+                        messageInfo = BaseMessageInfo(messageId = "intent-1"),
+                        messageSegment =
+                                Seg(
+                                        "seglist",
+                                        listOf(
+                                                Seg("text", "你好"),
+                                                Seg(
+                                                        "avatar_intent",
+                                                        """
+                                                        {
+                                                          "speech": "你好",
+                                                          "emotion": {
+                                                            "name": "happy",
+                                                            "intensity": 0.8
+                                                          },
+                                                          "action": {
+                                                            "name": "android.wave",
+                                                            "parameters": {
+                                                              "group": "Wave",
+                                                              "index": 1,
+                                                              "loop": false
+                                                            }
+                                                          }
+                                                        }
+                                                        """.trimIndent()
+                                                )
+                                        )
+                                )
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.Success)
+        val intent =
+                (result as Live2DChatMessageHandler.ChatMessageResult.Success).avatarIntent
+        assertEquals("happy", intent?.emotion?.name)
+        assertEquals(0.8f, intent?.emotion?.intensity)
+        assertEquals("android.wave", intent?.action?.name)
+        assertEquals("Wave", intent?.action?.parameters?.get("group"))
+        assertEquals("1", intent?.action?.parameters?.get("index"))
+    }
+
+    @Test
+    fun usesIntentSpeechWhenControlMessageHasNoTextSegment() {
+        val message =
+                MessageBase(
+                        messageInfo = BaseMessageInfo(messageId = "intent-2"),
+                        messageSegment =
+                                Seg(
+                                        "avatar_intent",
+                                        """{"speech":"只有结构化消息","emotion":"neutral"}"""
+                                )
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.Success)
+        assertEquals(
+                "只有结构化消息",
+                (result as Live2DChatMessageHandler.ChatMessageResult.Success).message.content
+        )
+        assertEquals("neutral", result.avatarIntent?.emotion?.name)
+    }
+
+    @Test
+    fun parsesAvatarIntentFromAdditionalConfig() {
+        val message =
+                MessageBase.fromJsonString(
+                        """
+                        {
+                          "message_info": {
+                            "message_id": "intent-3",
+                            "additional_config": {
+                              "avatar_intent": {
+                                "emotion": {"name": "sad", "intensity": 0.4},
+                                "action": {"name": "think", "parameters": {}}
+                              }
+                            }
+                          },
+                          "message_segment": {
+                            "type": "text",
+                            "data": "让我想想"
+                          }
+                        }
+                        """.trimIndent()
+                )
+
+        val result = Live2DChatMessageHandler().handleStandardMessage(message)
+
+        assertTrue(result is Live2DChatMessageHandler.ChatMessageResult.Success)
+        val intent =
+                (result as Live2DChatMessageHandler.ChatMessageResult.Success).avatarIntent
+        assertEquals("sad", intent?.emotion?.name)
+        assertEquals("think", intent?.action?.name)
+    }
 }

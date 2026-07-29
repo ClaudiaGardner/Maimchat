@@ -59,6 +59,7 @@ class ChatWebSocketManager {
     val standardMessages: StateFlow<List<MessageBase>> = _standardMessages.asStateFlow()
     private var lastServerMessageTime: Long = 0L
     private var onMotionTrigger: ((String, Int, Boolean) -> Unit)? = null
+    private var onAvatarIntent: ((AvatarIntent) -> Unit)? = null
     private var onVoiceReceived: ((String) -> Unit)? = null
     private var userId: String = generateUserId()
     private var userNickname: String? = null
@@ -354,7 +355,14 @@ class ChatWebSocketManager {
                         formatInfo =
                                 FormatInfo(
                                         contentFormat = allTypes.distinct(),
-                                        acceptFormat = listOf("text", "image", "emoji", "voice")
+                                        acceptFormat =
+                                                listOf(
+                                                        "text",
+                                                        "image",
+                                                        "emoji",
+                                                        "voice",
+                                                        "avatar_intent"
+                                                )
                                 ),
                         templateInfo = null,
                         additionalConfig =
@@ -385,8 +393,12 @@ class ChatWebSocketManager {
                                 )
                         addMessage(adjusted)
                         if (!fromUser) {
-                            inferMotionGroup(adjusted.content)?.let { group ->
-                                onMotionTrigger?.invoke(group, 0, false)
+                            if (result.avatarIntent != null) {
+                                onAvatarIntent?.invoke(result.avatarIntent)
+                            } else {
+                                inferMotionGroup(adjusted.content)?.let { group ->
+                                    onMotionTrigger?.invoke(group, 0, false)
+                                }
                             }
                         }
                         if (srvTs > 0 && srvTs > lastServerMessageTime)
@@ -397,6 +409,7 @@ class ChatWebSocketManager {
                     val fromUser = isSenderMe(standard.messageInfo.senderInfo)
                     if (!fromUser) {
                         onVoiceReceived?.invoke(result.voiceData)
+                        result.avatarIntent?.let { onAvatarIntent?.invoke(it) }
                     }
                     addMessage(
                             ChatMessage(
@@ -412,6 +425,11 @@ class ChatWebSocketManager {
                                                     ?: System.currentTimeMillis()
                             )
                     )
+                }
+                is Live2DChatMessageHandler.ChatMessageResult.AvatarIntentProcessed -> {
+                    if (!isSenderMe(standard.messageInfo.senderInfo)) {
+                        onAvatarIntent?.invoke(result.avatarIntent)
+                    }
                 }
                 is Live2DChatMessageHandler.ChatMessageResult.EmojiProcessed -> {}
                 is Live2DChatMessageHandler.ChatMessageResult.Error ->
@@ -505,6 +523,9 @@ class ChatWebSocketManager {
     }
     fun setMotionTriggerCallback(callback: (String, Int, Boolean) -> Unit) {
         onMotionTrigger = callback
+    }
+    fun setAvatarIntentCallback(callback: (AvatarIntent) -> Unit) {
+        onAvatarIntent = callback
     }
     fun setVoiceReceivedCallback(callback: (String) -> Unit) {
         onVoiceReceived = callback

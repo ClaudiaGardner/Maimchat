@@ -121,6 +121,7 @@ fun ChatWithModelScreen(
     val standardMessages by chatManager.standardMessages.collectAsState()
     val currentUserNickname by chatManager.userNickname.collectAsState()
     val speakerEnabled by chatManager.speakerEnabled.collectAsState()
+    val isSpeaking by chatManager.isSpeaking.collectAsState()
     val prefs =
             remember(context) {
                 context.getSharedPreferences(
@@ -213,6 +214,10 @@ fun ChatWithModelScreen(
             remember(currentModel?.folderPath, configuration.orientation) {
                 mutableStateOf(false)
             }
+
+    LaunchedEffect(lifecycleManager, isSpeaking) {
+        lifecycleManager?.setLipSyncActive(isSpeaking)
+    }
 
     val cropLauncher =
             rememberLauncherForActivityResult(StartActivityForResult()) { result ->
@@ -399,6 +404,9 @@ fun ChatWithModelScreen(
                     lifecycleManager = newManager
                     chatManager.setMotionTriggerCallback { group, index, loop ->
                         newManager.playMotionByGroup(group, index, loop)
+                    }
+                    chatManager.setAvatarIntentCallback { intent ->
+                        newManager.applyAvatarIntent(intent)
                     }
                     chatManager.clearMessagesEphemeral()
                     chatManager.setActiveModel(currentModel?.name)

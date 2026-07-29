@@ -11,6 +11,8 @@ import android.os.Looper
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
+import com.l2dchat.chat.AvatarIntent
+import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
@@ -53,6 +55,14 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                         ChatServiceProtocol.MSG_EVENT_SNAPSHOT -> handleSnapshot(msg.data)
                         ChatServiceProtocol.MSG_EVENT_STANDARD_MESSAGE ->
                                 handleStandardMessage(msg.data)
+                        ChatServiceProtocol.MSG_EVENT_MOTION -> handleMotion(msg.data)
+                        ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT ->
+                                handleAvatarIntent(msg.data)
+                        ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE ->
+                                _isSpeaking.value =
+                                        msg.data.getBoolean(
+                                                ChatServiceProtocol.EXTRA_IS_SPEAKING
+                                        )
                         ChatServiceProtocol.MSG_EVENT_ERROR -> {
                             msg.data
                                     .getString(ChatServiceProtocol.EXTRA_ERROR_MESSAGE)
@@ -107,7 +117,9 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     private val _activeModel = MutableStateFlow<String?>(null)
     private val _speakerEnabled =
             MutableStateFlow(prefs.getBoolean(KEY_SPEAKER_ENABLED, true))
+    private val _isSpeaking = MutableStateFlow(false)
     private var motionCallback: ((String, Int, Boolean) -> Unit)? = null
+    private var avatarIntentCallback: ((AvatarIntent) -> Unit)? = null
 
     val connectionState: StateFlow<ChatConnectionState> = _connectionState.asStateFlow()
     val connectionLabel: StateFlow<String> = _connectionLabel.asStateFlow()
@@ -120,6 +132,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     val platform: StateFlow<String?> = _platform.asStateFlow()
     val activeModel: StateFlow<String?> = _activeModel.asStateFlow()
     val speakerEnabled: StateFlow<Boolean> = _speakerEnabled.asStateFlow()
+    val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
     fun bindService() {
         if (isBound) return
@@ -154,6 +167,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         serviceMessenger = null
         logger.warn("Service disconnected component=$name")
         _connectionState.value = ChatConnectionState.DISCONNECTED
+        _isSpeaking.value = false
     }
 
     fun ensureBound() {
@@ -288,6 +302,10 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         motionCallback = callback
     }
 
+    fun setAvatarIntentCallback(callback: (AvatarIntent) -> Unit) {
+        avatarIntentCallback = callback
+    }
+
     fun requestSnapshot() {
         sendCommand(ChatServiceProtocol.MSG_REQUEST_SNAPSHOT)
     }
@@ -348,6 +366,19 @@ class ChatServiceClient(context: Context) : ServiceConnection {
             if (messageId != null && current.any { it.messageInfo.messageId == messageId }) current
             else current + message
         }
+    }
+
+    private fun handleMotion(data: Bundle) {
+        val group = data.getString(ChatServiceProtocol.EXTRA_MOTION_GROUP) ?: return
+        val index = data.getInt(ChatServiceProtocol.EXTRA_MOTION_INDEX)
+        val loop = data.getBoolean(ChatServiceProtocol.EXTRA_MOTION_LOOP)
+        motionCallback?.invoke(group, index, loop)
+    }
+
+    private fun handleAvatarIntent(data: Bundle) {
+        val payload =
+                data.getString(ChatServiceProtocol.EXTRA_AVATAR_INTENT_JSON) ?: return
+        AvatarIntentCodec.parse(payload)?.let { avatarIntentCallback?.invoke(it) }
     }
 
     private fun handleSnapshot(data: Bundle) {
@@ -439,6 +470,9 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_EVENT_SNAPSHOT -> "MSG_EVENT_SNAPSHOT"
                 ChatServiceProtocol.MSG_EVENT_ERROR -> "MSG_EVENT_ERROR"
                 ChatServiceProtocol.MSG_EVENT_STANDARD_MESSAGE -> "MSG_EVENT_STANDARD_MESSAGE"
+                ChatServiceProtocol.MSG_EVENT_MOTION -> "MSG_EVENT_MOTION"
+                ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT -> "MSG_EVENT_AVATAR_INTENT"
+                ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE -> "MSG_EVENT_SPEAKING_STATE"
                 ChatServiceProtocol.MSG_SET_ACTIVE_MODEL -> "MSG_SET_ACTIVE_MODEL"
                 else -> "MSG_UNKNOWN_$what"
             }

@@ -6,8 +6,10 @@ import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.l2dchat.chat.AvatarIntent
 import com.live2d.demo.full.LAppDelegate
 import com.live2d.demo.full.LAppLive2DManager
+import com.live2d.demo.full.LAppModel
 import com.live2d.sdk.cubism.framework.CubismFramework
 import java.lang.reflect.Field
 import java.util.concurrent.atomic.AtomicBoolean
@@ -147,6 +149,7 @@ private constructor(
     private val isInstanceInitialized = AtomicBoolean(false)
     private val isGLContextReady = AtomicBoolean(false)
     private val isDestroyed = AtomicBoolean(false)
+    private val isLipSyncActive = AtomicBoolean(false)
     private var stateCallback: StateCallback? = null
     private val gestureLogTag = "${TAG}_Gesture"
 
@@ -436,6 +439,61 @@ private constructor(
     }
 
     // ======= 动作 & 信息 =======
+    fun setLipSyncActive(active: Boolean) {
+        isLipSyncActive.set(active)
+        if (!active) {
+            glSurfaceView?.queueEvent {
+                (LAppLive2DManager.getInstance()?.getModel(0) as? LAppModel)
+                        ?.setExternalLipSync(false, 0f)
+            }
+        }
+    }
+
+    fun applyAvatarIntent(intent: AvatarIntent): Boolean {
+        if (isDestroyed.get()) return false
+        val gl = glSurfaceView ?: return false
+        val plan = AvatarIntentMapper.map(intent)
+        return try {
+            gl.queueEvent {
+                try {
+                    val model =
+                            LAppLive2DManager.getInstance()?.getModel(0) as? LAppModel
+                                    ?: return@queueEvent
+                    plan.expressionCandidates
+                            .firstNotNullOfOrNull(model::resolveExpressionName)
+                            ?.let(model::setExpression)
+
+                    val group =
+                            plan.motionCandidates.firstNotNullOfOrNull(
+                                    model::resolveMotionGroupName
+                            )
+                    if (group != null) {
+                        val count = model.getMotionCountForGroup(group)
+                        val index =
+                                if (count > 0) plan.motionIndex.coerceIn(0, count - 1)
+                                else plan.motionIndex
+                        invokeStartMotionReflect(
+                                model,
+                                group,
+                                index,
+                                com.live2d.demo.LAppDefine.Priority.FORCE.getPriority(),
+                                plan.loop,
+                                plan.loop,
+                                null,
+                                null
+                        )
+                    }
+                } catch (error: Exception) {
+                    Log.e(TAG, "Failed to apply avatar intent", error)
+                }
+            }
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to queue avatar intent", error)
+            false
+        }
+    }
+
     fun playMotion(
             group: String,
             index: Int,
@@ -992,6 +1050,26 @@ private constructor(
             try {
                 if (isSetup && !lifecycle.isDestroyed()) {
                     live2DManager?.setActiveTransformKey(transformContextKey)
+                    val lipSyncActive = lifecycle.isLipSyncActive.get()
+                    val mouthOpen =
+                            if (lipSyncActive) {
+                                val seconds = System.nanoTime() / 1_000_000_000.0
+                                (0.18 +
+                                                0.52 *
+                                                        kotlin.math.abs(
+                                                                kotlin.math.sin(seconds * 9.7)
+                                                        ) +
+                                                0.18 *
+                                                        kotlin.math.abs(
+                                                                kotlin.math.sin(seconds * 4.3)
+                                                        ))
+                                        .toFloat()
+                                        .coerceIn(0f, 1f)
+                            } else {
+                                0f
+                            }
+                    (live2DManager?.getModel(0) as? LAppModel)
+                            ?.setExternalLipSync(lipSyncActive, mouthOpen)
                     // 注意：delegate.run() 内部已经调用 LAppPal.updateTime() 更新帧间 delta。
                     // 这里如果再次调用会导致两次连续更新时间，相减得到的 deltaTime 极小，
                     // 模型的 update() 里读取到几乎为 0 的 deltaTime，从而表现为“动作静止/极慢”。

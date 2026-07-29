@@ -10,6 +10,8 @@ import android.os.Message
 import android.os.Messenger
 import android.os.Process
 import android.os.RemoteException
+import com.l2dchat.chat.AvatarIntent
+import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.ChatWebSocketManager
 import com.l2dchat.chat.ChatWebSocketManager.ChatMessage
 import com.l2dchat.chat.ChatWebSocketManager.ConnectionState
@@ -42,6 +44,7 @@ class ChatConnectionService : Service() {
     private lateinit var manager: ChatWebSocketManager
     private lateinit var audioPlayer: DeviceAudioPlayer
     private var speakerEnabled: Boolean = true
+    private var isSpeaking: Boolean = false
 
     private var lastKnownUrl: String? = null
     private var lastKnownPlatform: String? = null
@@ -53,7 +56,15 @@ class ChatConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         manager = ChatWebSocketManager()
-        audioPlayer = DeviceAudioPlayer(applicationContext) { error -> notifyError(error) }
+        audioPlayer =
+                DeviceAudioPlayer(
+                        context = applicationContext,
+                        onPlaybackError = { error -> notifyError(error) },
+                        onPlaybackStateChanged = { speaking ->
+                            isSpeaking = speaking
+                            broadcastSpeakingState()
+                        }
+                )
         speakerEnabled =
                 getSharedPreferences(CHAT_PREFS, MODE_PRIVATE)
                         .getBoolean(KEY_SPEAKER_ENABLED, true)
@@ -66,6 +77,10 @@ class ChatConnectionService : Service() {
                 }
             }
         }
+        manager.setMotionTriggerCallback { group, index, loop ->
+            broadcastMotion(group, index, loop)
+        }
+        manager.setAvatarIntentCallback { intent -> broadcastAvatarIntent(intent) }
         manager.setActiveModel(applicationContext, restoreModelName())
         applyStoredConfiguration()
         startObservers()
@@ -164,6 +179,39 @@ class ChatConnectionService : Service() {
                     putLong(ChatServiceProtocol.EXTRA_MESSAGE_TIMESTAMP, message.timestamp)
                 }
         sendToClients(ChatServiceProtocol.MSG_EVENT_NEW_MESSAGE, bundle)
+    }
+
+    private fun broadcastMotion(group: String, index: Int, loop: Boolean) {
+        val bundle =
+                Bundle().apply {
+                    putString(ChatServiceProtocol.EXTRA_MOTION_GROUP, group)
+                    putInt(ChatServiceProtocol.EXTRA_MOTION_INDEX, index)
+                    putBoolean(ChatServiceProtocol.EXTRA_MOTION_LOOP, loop)
+                }
+        sendToClients(ChatServiceProtocol.MSG_EVENT_MOTION, bundle)
+    }
+
+    private fun broadcastAvatarIntent(intent: AvatarIntent) {
+        val bundle =
+                Bundle().apply {
+                    putString(
+                            ChatServiceProtocol.EXTRA_AVATAR_INTENT_JSON,
+                            AvatarIntentCodec.toJson(intent)
+                    )
+                }
+        sendToClients(ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT, bundle)
+    }
+
+    private fun broadcastSpeakingState(target: Messenger? = null) {
+        val bundle =
+                Bundle().apply {
+                    putBoolean(ChatServiceProtocol.EXTRA_IS_SPEAKING, isSpeaking)
+                }
+        if (target != null) {
+            sendToClient(target, ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE, bundle)
+        } else {
+            sendToClients(ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE, bundle)
+        }
     }
 
     private fun sendSnapshot(target: Messenger? = null) {
@@ -427,6 +475,7 @@ class ChatConnectionService : Service() {
                         service.clients.add(it)
                         service.sendSnapshot(it)
                         service.broadcastConnectionState(service.manager.connectionState.value)
+                        service.broadcastSpeakingState(it)
                     }
                 }
                 ChatServiceProtocol.MSG_UNREGISTER_CLIENT -> {

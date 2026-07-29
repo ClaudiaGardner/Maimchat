@@ -15,11 +15,21 @@ class Live2DChatMessageHandler {
     fun handleStandardMessage(message: MessageBase): ChatMessageResult {
         return try {
             val parsed: ParsedMessageContent = parseMessageSegment(message.messageSegment)
+            val avatarIntent =
+                    parsed.avatarIntentPayloads.firstNotNullOfOrNull(AvatarIntentCodec::parse)
+                            ?: AvatarIntentCodec.fromAdditionalConfig(
+                                    message.messageInfo.additionalConfig
+                            )
+            if (parsed.getText().isBlank() && !avatarIntent?.speech.isNullOrBlank()) {
+                parsed.addText(requireNotNull(avatarIntent?.speech))
+            }
             when {
-                parsed.hasVoice() -> handleVoiceMessage(message, parsed)
-                parsed.hasImage() -> handleImageMessage(message, parsed)
-                parsed.hasEmoji() -> handleEmojiMessage(message, parsed)
-                else -> handleTextMessage(message, parsed)
+                parsed.hasVoice() -> handleVoiceMessage(message, parsed, avatarIntent)
+                parsed.hasImage() -> handleImageMessage(message, parsed, avatarIntent)
+                parsed.hasEmoji() -> handleEmojiMessage(message, parsed, avatarIntent)
+                parsed.getText().isNotBlank() -> handleTextMessage(message, parsed, avatarIntent)
+                avatarIntent != null -> ChatMessageResult.AvatarIntentProcessed(avatarIntent)
+                else -> handleTextMessage(message, parsed, null)
             }
         } catch (e: Exception) {
             chatLogger.error("处理消息失败", e)
@@ -41,6 +51,8 @@ class Live2DChatMessageHandler {
             "emoji" -> content.addEmoji(segment.data.toString())
             "voice" -> content.addVoice(segment.data.toString())
             "voiceurl" -> content.addVoice(segment.data.toString())
+            "avatar_intent", "maimchat_control", "avatar" ->
+                    content.addAvatarIntent(segment.data.toString())
             // MaiBot prepends this control segment when replying to a message. It is routing
             // metadata, not user-visible text.
             "reply" -> Unit
@@ -63,7 +75,8 @@ class Live2DChatMessageHandler {
 
     private fun handleTextMessage(
             message: MessageBase,
-            content: ParsedMessageContent
+            content: ParsedMessageContent,
+            avatarIntent: AvatarIntent?
     ): ChatMessageResult {
         val chat =
                 ChatWebSocketManager.ChatMessage(
@@ -73,11 +86,12 @@ class Live2DChatMessageHandler {
                         timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
                 )
         emit(MessageEvent.ChatReceived(chat))
-        return ChatMessageResult.Success(chat)
+        return ChatMessageResult.Success(chat, avatarIntent = avatarIntent)
     }
     private fun handleVoiceMessage(
             message: MessageBase,
-            content: ParsedMessageContent
+            content: ParsedMessageContent,
+            avatarIntent: AvatarIntent?
     ): ChatMessageResult {
         val voice = content.voiceData.firstOrNull() ?: return ChatMessageResult.Error("语音数据为空")
         emit(MessageEvent.VoiceReceived(voice))
@@ -91,13 +105,18 @@ class Live2DChatMessageHandler {
                             timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
                     )
             emit(MessageEvent.ChatReceived(chat))
-            return ChatMessageResult.Success(chat, voiceData = voice)
+            return ChatMessageResult.Success(
+                    chat,
+                    voiceData = voice,
+                    avatarIntent = avatarIntent
+            )
         }
-        return ChatMessageResult.VoiceProcessed(voice)
+        return ChatMessageResult.VoiceProcessed(voice, avatarIntent)
     }
     private fun handleEmojiMessage(
             message: MessageBase,
-            content: ParsedMessageContent
+            content: ParsedMessageContent,
+            avatarIntent: AvatarIntent?
     ): ChatMessageResult {
         val emoji = content.emojiData.firstOrNull() ?: return ChatMessageResult.Error("表情数据为空")
         emit(MessageEvent.EmojiReceived(emoji))
@@ -111,11 +130,12 @@ class Live2DChatMessageHandler {
                         timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
                 )
         emit(MessageEvent.ChatReceived(chat))
-        return ChatMessageResult.Success(chat)
+        return ChatMessageResult.Success(chat, avatarIntent = avatarIntent)
     }
     private fun handleImageMessage(
             message: MessageBase,
-            content: ParsedMessageContent
+            content: ParsedMessageContent,
+            avatarIntent: AvatarIntent?
     ): ChatMessageResult {
         val image = content.imageData.firstOrNull()
                 ?: return ChatMessageResult.Error("图片数据为空")
@@ -129,7 +149,7 @@ class Live2DChatMessageHandler {
                         timestamp = ((message.messageInfo.time ?: 0.0) * 1000).toLong()
                 )
         emit(MessageEvent.ChatReceived(chat))
-        return ChatMessageResult.Success(chat)
+        return ChatMessageResult.Success(chat, avatarIntent = avatarIntent)
     }
     private fun emit(event: MessageEvent) {
         _messageEvents.tryEmit(event)
@@ -140,10 +160,16 @@ class Live2DChatMessageHandler {
     sealed class ChatMessageResult {
         data class Success(
                 val message: ChatWebSocketManager.ChatMessage,
-                val voiceData: String? = null
+                val voiceData: String? = null,
+                val avatarIntent: AvatarIntent? = null
         ) : ChatMessageResult()
 
-        data class VoiceProcessed(val voiceData: String) : ChatMessageResult()
+        data class VoiceProcessed(
+                val voiceData: String,
+                val avatarIntent: AvatarIntent? = null
+        ) : ChatMessageResult()
+
+        data class AvatarIntentProcessed(val avatarIntent: AvatarIntent) : ChatMessageResult()
 
         data class EmojiProcessed(val emojiData: String) : ChatMessageResult()
 
@@ -167,6 +193,7 @@ class ParsedMessageContent {
     val imageData: MutableList<String> = mutableListOf()
     val emojiData: MutableList<String> = mutableListOf()
     val voiceData: MutableList<String> = mutableListOf()
+    val avatarIntentPayloads: MutableList<String> = mutableListOf()
     fun addText(t: String): Unit {
         textData.add(t)
     }
@@ -178,6 +205,9 @@ class ParsedMessageContent {
     }
     fun addVoice(v: String): Unit {
         voiceData.add(v)
+    }
+    fun addAvatarIntent(payload: String): Unit {
+        avatarIntentPayloads.add(payload)
     }
     fun addUnknown(type: String, data: String): Unit {
         chatLogger.warn(

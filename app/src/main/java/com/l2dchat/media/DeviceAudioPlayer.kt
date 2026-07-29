@@ -12,11 +12,13 @@ import kotlinx.coroutines.withContext
 /** Plays MaiBot voice/voiceurl segments through Android's normal media output route. */
 class DeviceAudioPlayer(
         context: Context,
-        private val onPlaybackError: (String) -> Unit
+        private val onPlaybackError: (String) -> Unit,
+        private val onPlaybackStateChanged: (Boolean) -> Unit = {}
 ) {
     private val appContext = context.applicationContext
     private var player: MediaPlayer? = null
     private var temporaryFile: File? = null
+    private var isPlaying = false
 
     suspend fun play(payload: String): Result<Unit> {
         val source =
@@ -69,12 +71,14 @@ class DeviceAudioPlayer(
                                 is AudioSource.Url -> setDataSource(source.url)
                             }
                             setOnCompletionListener { completed ->
+                                updatePlaybackState(false)
                                 completed.reset()
                                 completed.release()
                                 if (player === completed) player = null
                                 deleteTemporaryFile()
                             }
                             setOnErrorListener { failed, what, extra ->
+                                updatePlaybackState(false)
                                 failed.reset()
                                 failed.release()
                                 if (player === failed) player = null
@@ -82,17 +86,22 @@ class DeviceAudioPlayer(
                                 onPlaybackError("语音播放失败（$what/$extra）")
                                 true
                             }
-                            setOnPreparedListener { it.start() }
+                            setOnPreparedListener {
+                                it.start()
+                                updatePlaybackState(true)
+                            }
                             prepareAsync()
                         }
                 player = mediaPlayer
             }.onFailure {
+                updatePlaybackState(false)
                 if (source is AudioSource.Local) source.file.delete()
             }
         }
     }
 
     fun stop() {
+        updatePlaybackState(false)
         val current = player
         player = null
         if (current != null) {
@@ -106,6 +115,12 @@ class DeviceAudioPlayer(
     private fun deleteTemporaryFile() {
         temporaryFile?.delete()
         temporaryFile = null
+    }
+
+    private fun updatePlaybackState(playing: Boolean) {
+        if (isPlaying == playing) return
+        isPlaying = playing
+        onPlaybackStateChanged(playing)
     }
 
     private sealed interface AudioSource {

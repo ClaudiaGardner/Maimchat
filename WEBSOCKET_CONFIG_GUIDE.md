@@ -250,6 +250,49 @@ chatManager.sendUserMessage("你好！")
 }
 ```
 
+#### 5. 结构化形象意图（Amaidesu 兼容）
+
+Android 端会在发送消息的 `accept_format` 中声明 `avatar_intent`。服务端可把与
+Amaidesu 相同语义的 `speech / emotion / action(parameters)` 放入
+`additional_config.avatar_intent`：
+
+```json
+{
+  "message_info": {
+    "platform": "maibot",
+    "message_id": "intent_123",
+    "time": 1722222223.0,
+    "sender_info": {
+      "user_info": {
+        "platform": "maibot",
+        "user_id": "maibot",
+        "user_nickname": "MaiBot"
+      }
+    },
+    "additional_config": {
+      "avatar_intent": {
+        "speech": "你好，欢迎回来",
+        "emotion": {"name": "happy", "intensity": 0.8},
+        "action": {
+          "name": "android.wave",
+          "parameters": {"group": "Wave", "index": 0, "loop": false}
+        }
+      }
+    }
+  },
+  "message_segment": {
+    "type": "text",
+    "data": "你好，欢迎回来"
+  }
+}
+```
+
+也可以发送类型为 `avatar_intent`、数据为上述意图 JSON 字符串的消息段。动作名允许
+使用 Amaidesu 的全限定形式（例如 `android.wave`）；Android 端会读取最后一段动作名，
+并优先使用 `parameters.group/index/loop`。如果模型没有对应资源，会按别名依次退化到
+`TapBody` 或 `Idle`。带有 `voice`/`voiceurl` 的回复在扬声器播放期间会自动驱动模型
+配置的 LipSync 参数。
+
 ## 连接状态监听
 
 ```kotlin
