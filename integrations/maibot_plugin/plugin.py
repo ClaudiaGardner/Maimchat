@@ -114,6 +114,10 @@ class FeatureConfig(PluginConfigBase):
         default=True,
         description="允许 Android 设备使用端到端实时音视频模型",
     )
+    realtime_allowed_platforms: list[str] = Field(
+        default_factory=lambda: [MAIMCHAT_ANDROID_PLATFORM],
+        description="允许领取端到端短期令牌的 maim_message 平台名",
+    )
     realtime_provider_name: str = Field(
         default="AlibabaDashScope",
         description="签发实时会话短期令牌所使用的 MaiBot API 供应商",
@@ -862,7 +866,12 @@ class MaimchatDevicePlugin(MaiBotPlugin):
         # This command returns a bearer credential. Never serve it to QQ, WebUI, or
         # another adapter even if somebody manually copies the hidden command.
         platform = str(kwargs.get("platform") or "").strip()
-        if platform != MAIMCHAT_ANDROID_PLATFORM:
+        allowed_platforms = {
+            str(value).strip()
+            for value in self.config.features.realtime_allowed_platforms
+            if str(value).strip()
+        }
+        if platform not in allowed_platforms:
             self.ctx.logger.warning(
                 "拒绝非 Android 平台的实时会话请求 platform=%s request=%s",
                 platform or "-",

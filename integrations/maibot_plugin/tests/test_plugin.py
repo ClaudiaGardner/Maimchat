@@ -33,6 +33,7 @@ def configured_plugin(
     *,
     camera_enabled: bool = True,
     call_tts_enabled: bool = True,
+    realtime_allowed_platforms: list[str] | None = None,
 ) -> tuple[plugin.MaimchatDevicePlugin, FakeSend]:
     instance = plugin.create_plugin()
     instance.set_plugin_config(
@@ -47,6 +48,9 @@ def configured_plugin(
                 "call_tts_voice": "voice-test",
                 "realtime_enabled": True,
                 "realtime_voice": "Tina",
+                "realtime_allowed_platforms": (
+                    realtime_allowed_platforms or ["maimchat_android"]
+                ),
             }
         }
     )
@@ -335,6 +339,29 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, (False, "", 2))
         self.assertEqual(sender.calls, [])
+
+    async def test_realtime_session_accepts_private_configured_platform(self) -> None:
+        instance, sender = configured_plugin(
+            realtime_allowed_platforms=["private_android_device"]
+        )
+
+        with (
+            patch.object(plugin, "_load_provider_api_key", return_value="permanent-test-key"),
+            patch.object(plugin, "_load_realtime_persona", return_value="你是测试角色"),
+            patch.object(
+                plugin,
+                "_create_temporary_api_key",
+                new=AsyncMock(return_value=("st-short-lived", 2_000_000_000)),
+            ),
+        ):
+            result = await instance.handle_realtime_session(
+                stream_id="stream-private",
+                platform="private_android_device",
+                matched_groups={"payload": encode_realtime_request()},
+            )
+
+        self.assertEqual(result, (True, "", 2))
+        self.assertEqual(sender.calls[0][0], "realtime_session")
 
 
 if __name__ == "__main__":

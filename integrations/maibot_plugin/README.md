@@ -22,7 +22,7 @@ Android 的视频通话模式会把一段自动分轮的语音和当前摄像头
 
 插件 1.4.0 还提供可选的端到端实时模式。Android 先通过现有 `maim_message`
 连接发送隐藏的 `/maimchat realtime-session` 命令；插件只接受
-`maimchat_android` 平台的请求，使用 MaiBot 已配置的长期 API Key 签发最长
+`realtime_allowed_platforms` 明确列出的平台请求，使用 MaiBot 已配置的长期 API Key 签发最长
 30 分钟的阿里云短期 Key，再通过 `realtime_session` 自定义段返回。Android 随后
 直接连接 Qwen Omni Realtime，长期 Key 不会进入 APK。实时模式连续传输
 16 kHz PCM 麦克风音频并流式播放 24 kHz PCM 回复，支持语义 VAD、插话打断以及
