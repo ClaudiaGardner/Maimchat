@@ -1,8 +1,8 @@
 # Maimchat Android
 
-> MaiBot 0.6.8 的原生 Android 客户端正在 `dev` 分支进行。App 使用
-> `maim_message` 标准消息直连 MaiBot，不依赖 Unity 或独立 Adapter，并包含展台常亮、
-> 持续重连、Live2D 资源热更新和 APK OTA。部署说明见
+> 当前版本在 Maimchat 原有的原生 Android + Cubism 架构上，增加 MaiBot 0.6.8
+> `maim_message` 标准消息直连、展台常亮、持续重连、Live2D 资源热更新和 APK OTA。
+> 这些能力直接集成在 Android App 中。部署说明见
 > [`ANDROID_DEPLOYMENT.md`](./ANDROID_DEPLOYMENT.md)。
 
 基于 Live2D Cubism SDK 与 Jetpack Compose 打造的移动端实时聊天示例。

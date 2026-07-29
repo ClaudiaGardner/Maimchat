@@ -6,6 +6,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
+import com.l2dchat.network.bearerAuthorizationValue
 import com.l2dchat.preferences.ChatPreferenceKeys
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -130,7 +131,9 @@ class ChatWebSocketManager {
                 Request.Builder()
                         .url(url)
                         .addHeader("platform", activePlatform)
-        this.authToken?.let { requestBuilder.addHeader("Authorization", it) }
+        bearerAuthorizationValue(this.authToken)?.let {
+            requestBuilder.addHeader("Authorization", it)
+        }
         val request = requestBuilder.build()
 
         val authStatus =

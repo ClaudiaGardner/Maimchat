@@ -8,6 +8,7 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.l2dchat.BuildConfig
+import com.l2dchat.network.bearerAuthorizationValue
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -15,10 +16,10 @@ import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 data class AppUpdateManifest(
         val versionCode: Int,
@@ -63,10 +64,9 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                         Request.Builder()
                                 .url(manifestUrl)
                                 .apply {
-                                    authToken
-                                            ?.trim()
-                                            ?.takeIf { it.isNotEmpty() }
-                                            ?.let { header("Authorization", "Bearer $it") }
+                                    bearerAuthorizationValue(authToken)?.let {
+                                        header("Authorization", it)
+                                    }
                                 }
                                 .build()
                 client.newCall(request).execute().use { response ->
@@ -81,16 +81,11 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                     if (manifest.versionCode <= BuildConfig.VERSION_CODE) {
                         return@withContext null
                     }
-                    val base =
-                            manifestUrl.toHttpUrlOrNull()
-                                    ?: error("更新清单 URL 无效: $manifestUrl")
-                    val resolved =
-                            base.resolve(manifest.apkUrl)
-                                    ?: error("APK URL 无效: ${manifest.apkUrl}")
+                    val resolved = resolveAssetUrl(manifestUrl, manifest.apkUrl, "APK")
                     AvailableAppUpdate(
                             versionCode = manifest.versionCode,
                             versionName = manifest.versionName,
-                            apkUrl = resolved.toString(),
+                            apkUrl = resolved,
                             sha256 = manifest.sha256.lowercase(),
                             notes = manifest.notes,
                             mandatory = manifest.mandatory
@@ -108,10 +103,9 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                         Request.Builder()
                                 .url(update.apkUrl)
                                 .apply {
-                                    authToken
-                                            ?.trim()
-                                            ?.takeIf { it.isNotEmpty() }
-                                            ?.let { header("Authorization", "Bearer $it") }
+                                    bearerAuthorizationValue(authToken)?.let {
+                                        header("Authorization", it)
+                                    }
                                 }
                                 .build()
                 val targetDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
@@ -177,12 +171,12 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                     val currentVersion = versions.getInt("version_${resource.id}", 0)
                     if (resource.version <= currentVersion) continue
 
-                    val base =
-                            manifestUrl.toHttpUrlOrNull()
-                                    ?: error("更新清单 URL 无效: $manifestUrl")
                     val resourceUrl =
-                            base.resolve(resource.url)?.toString()
-                                    ?: error("资源包 URL 无效: ${resource.url}")
+                            resolveAssetUrl(
+                                    manifestUrl,
+                                    resource.url,
+                                    "资源包 ${resource.id}"
+                            )
                     val archive =
                             downloadResourceArchive(
                                     resource.id,
@@ -242,10 +236,9 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                 Request.Builder()
                         .url(manifestUrl)
                         .apply {
-                            authToken
-                                    ?.trim()
-                                    ?.takeIf { it.isNotEmpty() }
-                                    ?.let { header("Authorization", "Bearer $it") }
+                            bearerAuthorizationValue(authToken)?.let {
+                                header("Authorization", it)
+                            }
                         }
                         .build()
         return client.newCall(request).execute().use { response ->
@@ -265,10 +258,9 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
                 Request.Builder()
                         .url(url)
                         .apply {
-                            authToken
-                                    ?.trim()
-                                    ?.takeIf { it.isNotEmpty() }
-                                    ?.let { header("Authorization", "Bearer $it") }
+                            bearerAuthorizationValue(authToken)?.let {
+                                header("Authorization", it)
+                            }
                         }
                         .build()
         val downloadDir = File(appContext.cacheDir, "resource-updates").apply { mkdirs() }
@@ -356,6 +348,25 @@ class AppUpdateManager(context: Context, private val client: OkHttpClient = OkHt
     }
 
     companion object {
+        internal fun resolveAssetUrl(
+                manifestUrl: String,
+                assetUrl: String,
+                label: String
+        ): String {
+            val base =
+                    manifestUrl.toHttpUrlOrNull()
+                            ?: error("更新清单 URL 无效: $manifestUrl")
+            val resolved = base.resolve(assetUrl) ?: error("$label URL 无效: $assetUrl")
+            require(
+                    resolved.scheme == base.scheme &&
+                            resolved.host == base.host &&
+                            resolved.port == base.port
+            ) {
+                "$label URL 必须与更新清单同源"
+            }
+            return resolved.toString()
+        }
+
         fun resolveManifestUrl(explicitUrl: String?, webSocketUrl: String?): String? {
             explicitUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
             val socket = webSocketUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return null

@@ -1,6 +1,7 @@
 # Maimchat Android 部署说明
 
-该分支将 Maimchat 改造成无 Unity、无独立 Adapter 的 Android 常驻客户端。
+Maimchat 本身是基于 Cubism SDK for Java 的原生 Android 客户端。本方案在现有架构上
+增加 MaiBot 0.6.8 直连、平板常驻和私有更新能力，不引入额外的协议转换服务。
 
 ## 架构
 
@@ -15,7 +16,7 @@ Android 平板
                   MaiBot
 ```
 
-Android App 自己生成和解析 `MessageBase`，不需要 Unity 或单独的协议转换服务。
+Android App 自己生成和解析 `MessageBase`，直接与 MaiBot 通信。
 App 通过 `platform: maimchat_android` WebSocket 请求头注册回复路由，MaiBot 的
 `[bot].platforms` 需要包含对应账号，例如：
 
@@ -53,8 +54,9 @@ Nginx/Caddy：
 - 在反向代理层完成 TLS、访问令牌、IP/VPN 限制和日志记录。
 - 保留并转发 App 发送的 `platform` 请求头。
 
-不要直接向公网开放 MaiBot 的 8000 端口。App 的“访问令牌”字段会以 Bearer Token
-写入 `Authorization` 请求头。
+不要直接向公网开放 MaiBot 的 8000 端口。App 的“访问令牌”字段可填写原始 token
+或完整的 `Bearer ...` 值，发送时会统一写入 `Authorization` 请求头。更新清单中的
+APK 与资源包 URL 必须和清单同源，避免把访问令牌发送到其他站点。
 
 ## 发布更新
 
