@@ -22,6 +22,7 @@ tcmofashi: 本项目纯纯的vibe coding，还请见谅
 - **结构化形象驱动**：兼容 Amaidesu 风格的 `speech / emotion / action(parameters)` 意图，按当前模型已有资源匹配表情和动作；播放 MaiBot 语音时自动驱动 Live2D 口型。
 - **免按键语音轮次**：可从“更多操作”开启常驻收音，Android 端使用轻量自适应 VAD 自动识别人声起止并发送 WAV；断线或角色扬声器播放时自动暂停，避免空消息和声音回录。
 - **按需视觉输入**：用户明确授权后，MaiBot 可用带 `request_id` 的 `device_request` 请求一次前置或后置摄像头快照；默认关闭，不持续录像，回传图片可与原请求关联。
+- **MaiBot 1.x 原生插件**：仓库内附 `@Tool` 插件，MaiBot 可直接向当前 Android 会话发送形象意图和按需拍照请求，不需要 Unity 或额外运行独立 Adapter。
 - **桌面扩展能力**：提供动态壁纸 `Live2DWallpaperService` 以及桌面小组件 `Live2DChatWidgetProvider` 骨架，演示消息气泡同步、手势交互。
 - **可扩展的配置存储**：将连接、用户、模型偏好写入 `SharedPreferences`，实现自动重连与多端共享。
 - **本地测试服务器**：附带 Node.js WebSocket Mock (`websocket-test-server.js`)，方便快速模拟服务端行为。
@@ -39,6 +40,8 @@ androidproj/
 │   ├── assets/             # 空目录（README 占位），用于放置自备模型资源
 │   ├── libs/               # 放置 Live2DCubismCore.aar（二进制需自行下载）
 │   └── CubismSdkForJava-*/ # 下载后解压得到的 Cubism Framework 模块
+├── integrations/
+│   └── maibot_plugin/      # MaiBot 1.x 原生设备控制插件
 ├── webdriver-test-server.js# 本地 WebSocket 测试服务
 ├── WEBSOCKET_CONFIG_GUIDE.md
 ├── wallpaper_guide.md
@@ -67,6 +70,18 @@ androidproj/
 1. **运行 Debug**：选择 `app` 模块运行到真机或模拟器，若资源未就绪会显示占位提示。
 
 > ⚠️ 本仓库不包含真实签名信息，Release 构建需要手动补全，见下文说明。
+
+## 🔌 接入 MaiBot 1.x
+
+运行 MaiBot 的主机更新到 `1.x` 后，将
+[`integrations/maibot_plugin`](./integrations/maibot_plugin/) 整个目录复制到 MaiBot
+的 `plugins/` 下，再从 WebUI 加载插件或重启 MaiBot。插件直接使用新版
+`maibot-plugin-sdk` 的 `ctx.send.custom` 向 Maimchat 会话发送消息，不启动旁路服务。
+
+插件提供 `maimchat_avatar_intent` 和 `maimchat_camera_snapshot` 两个 LLM 工具，
+以及 `/maimchat avatar happy wave`、`/maimchat camera front` 等联调命令。详细的
+版本要求、安全开关和协议示例见
+[`integrations/maibot_plugin/README.md`](./integrations/maibot_plugin/README.md)。
 
 ## 🧱 准备 Live2D Cubism SDK（必读）
 

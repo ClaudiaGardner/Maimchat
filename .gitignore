@@ -94,6 +94,10 @@ lint/outputs/
 *.secret.sh
 keygen.sh
 
+# Python caches generated while testing the MaiBot plugin
+__pycache__/
+*.py[cod]
+
 # Crash / ANR traces you might drop here manually
 anr-traces.txt
 crash.log
