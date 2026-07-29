@@ -24,6 +24,7 @@ object ChatServiceProtocol {
     const val MSG_EVENT_MOTION = 106
     const val MSG_EVENT_AVATAR_INTENT = 107
     const val MSG_EVENT_SPEAKING_STATE = 108
+    const val MSG_EVENT_DEVICE_REQUEST = 109
 
     // Common extras
     const val EXTRA_URL = "extra_url"
@@ -36,6 +37,7 @@ object ChatServiceProtocol {
     const val EXTRA_MODEL_NAME = "extra_model_name"
     const val EXTRA_MEDIA_TYPE = "extra_media_type"
     const val EXTRA_MEDIA_FILE_PATH = "extra_media_file_path"
+    const val EXTRA_MEDIA_REQUEST_ID = "extra_media_request_id"
     const val EXTRA_SPEAKER_ENABLED = "extra_speaker_enabled"
 
     // Event extras
@@ -54,4 +56,5 @@ object ChatServiceProtocol {
     const val EXTRA_MOTION_LOOP = "extra_motion_loop"
     const val EXTRA_AVATAR_INTENT_JSON = "extra_avatar_intent_json"
     const val EXTRA_IS_SPEAKING = "extra_is_speaking"
+    const val EXTRA_DEVICE_REQUEST_JSON = "extra_device_request_json"
 }

@@ -30,6 +30,7 @@ class ChatWebSocketManager {
     companion object {
         private const val DEFAULT_PLATFORM = ChatPreferenceKeys.DEFAULT_PLATFORM
         private const val MAX_LOG_MESSAGE_CHARS = 512
+        private const val DEVICE_REQUEST_MAX_AGE_MS = 30_000L
     }
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
@@ -60,6 +61,7 @@ class ChatWebSocketManager {
     private var lastServerMessageTime: Long = 0L
     private var onMotionTrigger: ((String, Int, Boolean) -> Unit)? = null
     private var onAvatarIntent: ((AvatarIntent) -> Unit)? = null
+    private var onDeviceRequest: ((DeviceRequest) -> Unit)? = null
     private var onVoiceReceived: ((String) -> Unit)? = null
     private var userId: String = generateUserId()
     private var userNickname: String? = null
@@ -361,7 +363,8 @@ class ChatWebSocketManager {
                                                         "image",
                                                         "emoji",
                                                         "voice",
-                                                        "avatar_intent"
+                                                        "avatar_intent",
+                                                        "device_request"
                                                 )
                                 ),
                         templateInfo = null,
@@ -375,15 +378,22 @@ class ChatWebSocketManager {
     private fun handleIncomingMessage(text: String) {
         try {
             val standard = MessageBase.fromJsonString(text)
+            val srvTs = ((standard.messageInfo.time ?: 0.0) * 1000).toLong()
+            val isHistorical =
+                    srvTs > 0 &&
+                            lastServerMessageTime > 0 &&
+                            srvTs + 1000 < lastServerMessageTime
+            val isFreshDeviceRequest =
+                    srvTs <= 0 ||
+                            srvTs >=
+                                    System.currentTimeMillis() -
+                                            DEVICE_REQUEST_MAX_AGE_MS
             when (val result = messageHandler.handleStandardMessage(standard)) {
                 is Live2DChatMessageHandler.ChatMessageResult.Success -> {
                     val fromUser = isSenderMe(standard.messageInfo.senderInfo)
-                    if (!fromUser) result.voiceData?.let { onVoiceReceived?.invoke(it) }
-                    val srvTs = ((standard.messageInfo.time ?: 0.0) * 1000).toLong()
-                    val isHistorical =
-                            srvTs > 0 &&
-                                    lastServerMessageTime > 0 &&
-                                    srvTs + 1000 < lastServerMessageTime
+                    if (!fromUser && !isHistorical) {
+                        result.voiceData?.let { onVoiceReceived?.invoke(it) }
+                    }
                     if (!isHistorical) {
                         val adjusted =
                                 result.message.copy(
@@ -393,6 +403,9 @@ class ChatWebSocketManager {
                                 )
                         addMessage(adjusted)
                         if (!fromUser) {
+                            if (isFreshDeviceRequest) {
+                                result.deviceRequest?.let { onDeviceRequest?.invoke(it) }
+                            }
                             if (result.avatarIntent != null) {
                                 onAvatarIntent?.invoke(result.avatarIntent)
                             } else {
@@ -401,39 +414,51 @@ class ChatWebSocketManager {
                                 }
                             }
                         }
-                        if (srvTs > 0 && srvTs > lastServerMessageTime)
-                                lastServerMessageTime = srvTs
                     }
                 }
                 is Live2DChatMessageHandler.ChatMessageResult.VoiceProcessed -> {
                     val fromUser = isSenderMe(standard.messageInfo.senderInfo)
-                    if (!fromUser) {
+                    if (!fromUser && !isHistorical) {
                         onVoiceReceived?.invoke(result.voiceData)
                         result.avatarIntent?.let { onAvatarIntent?.invoke(it) }
+                        if (isFreshDeviceRequest) {
+                            result.deviceRequest?.let { onDeviceRequest?.invoke(it) }
+                        }
                     }
-                    addMessage(
-                            ChatMessage(
-                                    id =
-                                            standard.messageInfo.messageId
-                                                    ?: generateMessageId(),
-                                    content = "[语音]",
-                                    isFromUser = fromUser,
-                                    timestamp =
-                                            ((standard.messageInfo.time ?: 0.0) * 1000)
-                                                    .toLong()
-                                                    .takeIf { it > 0 }
-                                                    ?: System.currentTimeMillis()
+                    if (!isHistorical) {
+                        addMessage(
+                                ChatMessage(
+                                        id =
+                                                standard.messageInfo.messageId
+                                                        ?: generateMessageId(),
+                                        content = "[语音]",
+                                        isFromUser = fromUser,
+                                        timestamp =
+                                                srvTs.takeIf { it > 0 }
+                                                        ?: System.currentTimeMillis()
+                                )
                             )
-                    )
+                    }
                 }
                 is Live2DChatMessageHandler.ChatMessageResult.AvatarIntentProcessed -> {
-                    if (!isSenderMe(standard.messageInfo.senderInfo)) {
+                    if (!isHistorical &&
+                                    isFreshDeviceRequest &&
+                                    !isSenderMe(standard.messageInfo.senderInfo)
+                    ) {
                         onAvatarIntent?.invoke(result.avatarIntent)
+                    }
+                }
+                is Live2DChatMessageHandler.ChatMessageResult.DeviceRequestProcessed -> {
+                    if (!isHistorical && !isSenderMe(standard.messageInfo.senderInfo)) {
+                        onDeviceRequest?.invoke(result.deviceRequest)
                     }
                 }
                 is Live2DChatMessageHandler.ChatMessageResult.EmojiProcessed -> {}
                 is Live2DChatMessageHandler.ChatMessageResult.Error ->
                         logger.error("消息处理错误: ${result.message}")
+            }
+            if (!isHistorical && srvTs > 0 && srvTs > lastServerMessageTime) {
+                lastServerMessageTime = srvTs
             }
             addStandardMessage(standard.redactedForHistory())
         } catch (e: Exception) {
@@ -453,20 +478,37 @@ class ChatWebSocketManager {
         sendStandardMessage(message)
     }
 
-    fun sendImageMessage(base64Jpeg: String) {
-        sendMediaMessage("image", base64Jpeg, "[照片]")
+    fun sendImageMessage(base64Jpeg: String, requestId: String? = null) {
+        val additional =
+                requestId?.let {
+                    mapOf(
+                            "device_response" to
+                                    mapOf(
+                                            "request_id" to it,
+                                            "type" to "camera_snapshot"
+                                    )
+                    )
+                }
+                        ?: emptyMap()
+        sendMediaMessage("image", base64Jpeg, "[照片]", additional)
     }
 
     fun sendVoiceMessage(base64Wav: String) {
         sendMediaMessage("voice", base64Wav, "[语音]")
     }
 
-    private fun sendMediaMessage(type: String, payload: String, displayText: String) {
+    private fun sendMediaMessage(
+            type: String,
+            payload: String,
+            displayText: String,
+            additional: Map<String, Any> = emptyMap()
+    ) {
         require(payload.isNotBlank()) { "媒体内容不能为空" }
         val message =
                 buildStandardMessage(
                         segments = listOf(Seg(type, payload)),
-                        messageType = type
+                        messageType = type,
+                        additional = additional
                 )
         addMessage(
                 ChatMessage(
@@ -526,6 +568,9 @@ class ChatWebSocketManager {
     }
     fun setAvatarIntentCallback(callback: (AvatarIntent) -> Unit) {
         onAvatarIntent = callback
+    }
+    fun setDeviceRequestCallback(callback: (DeviceRequest) -> Unit) {
+        onDeviceRequest = callback
     }
     fun setVoiceReceivedCallback(callback: (String) -> Unit) {
         onVoiceReceived = callback

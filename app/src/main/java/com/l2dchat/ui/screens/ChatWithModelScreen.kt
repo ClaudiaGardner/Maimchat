@@ -50,12 +50,14 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import com.l2dchat.chat.MessageBase
+import com.l2dchat.chat.DeviceRequest
 import com.l2dchat.chat.service.ChatServiceClient
 import com.l2dchat.live2d.ImprovedLive2DRenderer
 import com.l2dchat.live2d.Live2DModelLifecycleManager
@@ -64,6 +66,7 @@ import com.l2dchat.live2d.Live2DViewTransform
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.media.DeviceAudioRecorder
+import com.l2dchat.media.DeviceCameraSnapshotController
 import com.l2dchat.media.DeviceVoiceActivityRecorder
 import com.l2dchat.ui.components.CameraCaptureDialog
 import com.l2dchat.preferences.ChatPreferenceKeys
@@ -89,6 +92,7 @@ private val LandscapeReservedBottomHeight = 64.dp
 // 顶部 AppBar 高度（防止模型头部被遮或越界），Material3 默认 56.dp
 private val TopBarHeight = 56.dp
 private const val PREF_HANDS_FREE_VOICE = "hands_free_voice_enabled"
+private const val PREF_REMOTE_CAMERA = "remote_camera_enabled"
 
 private data class ConnectionErrorBanner(val id: Long, val message: String)
 
@@ -105,6 +109,7 @@ fun ChatWithModelScreen(
         onCheckForUpdates: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val orientationLabel =
@@ -171,6 +176,11 @@ fun ChatWithModelScreen(
     var handsFreeVoiceState by
             remember { mutableStateOf(DeviceVoiceActivityRecorder.State.STOPPED) }
     var requestHandsFreeAfterPermission by remember { mutableStateOf(false) }
+    var remoteCameraEnabled by
+            rememberSaveable {
+                mutableStateOf(prefs.getBoolean(PREF_REMOTE_CAMERA, false))
+            }
+    var requestRemoteCameraAfterPermission by remember { mutableStateOf(false) }
 
     val voiceActivityRecorder =
             remember(context, chatManager) {
@@ -204,6 +214,14 @@ fun ChatWithModelScreen(
                                         .show()
                             }
                         }
+                )
+            }
+
+    val remoteCameraController =
+            remember(context, lifecycleOwner) {
+                DeviceCameraSnapshotController(
+                        context.applicationContext,
+                        lifecycleOwner
                 )
             }
 
@@ -253,10 +271,16 @@ fun ChatWithModelScreen(
             rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
                     granted ->
                 if (granted) {
-                    showCameraCapture = true
+                    if (requestRemoteCameraAfterPermission) {
+                        remoteCameraEnabled = true
+                        prefs.edit().putBoolean(PREF_REMOTE_CAMERA, true).apply()
+                    } else {
+                        showCameraCapture = true
+                    }
                 } else {
                     Toast.makeText(context, "需要相机权限才能拍照", Toast.LENGTH_LONG).show()
                 }
+                requestRemoteCameraAfterPermission = false
             }
 
     var isLoadingDefaultModel by remember { mutableStateOf(selectedModel == null) }
@@ -317,6 +341,53 @@ fun ChatWithModelScreen(
                     isSpeaking ||
                             connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
             )
+        }
+    }
+
+    DisposableEffect(
+            chatManager,
+            remoteCameraController,
+            remoteCameraEnabled,
+            showCameraCapture
+    ) {
+        chatManager.setDeviceRequestCallback { request ->
+            if (!remoteCameraEnabled ||
+                            showCameraCapture ||
+                            request.type != DeviceRequest.Type.CAMERA_SNAPSHOT
+            ) {
+                return@setDeviceRequestCallback
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
+                            PackageManager.PERMISSION_GRANTED
+            ) {
+                remoteCameraEnabled = false
+                prefs.edit().putBoolean(PREF_REMOTE_CAMERA, false).apply()
+                return@setDeviceRequestCallback
+            }
+            Toast.makeText(
+                            context,
+                            "MaiBot 正在获取一次${if (request.camera == DeviceRequest.CameraFacing.FRONT) "前置" else "后置"}摄像头画面",
+                            Toast.LENGTH_SHORT
+                    )
+                    .show()
+            remoteCameraController.capture(
+                    request = request,
+                    onCaptured = { file ->
+                        chatManager.sendImage(file, request.requestId)
+                    },
+                    onError = { message ->
+                        Toast.makeText(
+                                        context,
+                                        "远程拍照失败：$message",
+                                        Toast.LENGTH_LONG
+                                )
+                                .show()
+                    }
+            )
+        }
+        onDispose {
+            chatManager.setDeviceRequestCallback(null)
+            remoteCameraController.stop()
         }
     }
 
@@ -696,6 +767,56 @@ fun ChatWithModelScreen(
                                             }
                                     )
                                     DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                        if (remoteCameraEnabled) {
+                                                            "关闭 MaiBot 按需拍照"
+                                                        } else {
+                                                            "允许 MaiBot 按需拍照"
+                                                        }
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                        Icons.Default.CameraAlt,
+                                                        contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                if (remoteCameraEnabled) {
+                                                    remoteCameraEnabled = false
+                                                    prefs.edit()
+                                                            .putBoolean(
+                                                                    PREF_REMOTE_CAMERA,
+                                                                    false
+                                                            )
+                                                            .apply()
+                                                    remoteCameraController.stop()
+                                                } else if (!chatManager.hasUserNickname()) {
+                                                    showConnectionDialog = true
+                                                } else if (ContextCompat.checkSelfPermission(
+                                                                context,
+                                                                Manifest.permission.CAMERA
+                                                        ) ==
+                                                        PackageManager.PERMISSION_GRANTED
+                                                ) {
+                                                    remoteCameraEnabled = true
+                                                    prefs.edit()
+                                                            .putBoolean(
+                                                                    PREF_REMOTE_CAMERA,
+                                                                    true
+                                                            )
+                                                            .apply()
+                                                } else {
+                                                    requestRemoteCameraAfterPermission = true
+                                                    cameraPermissionLauncher.launch(
+                                                            Manifest.permission.CAMERA
+                                                    )
+                                                }
+                                            }
+                                    )
+                                    DropdownMenuItem(
                                             text = { Text("查看日志") },
                                             onClick = {
                                                 overflowExpanded = false
@@ -834,6 +955,7 @@ fun ChatWithModelScreen(
                             ) {
                                 showCameraCapture = true
                             } else {
+                                requestRemoteCameraAfterPermission = false
                                 cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                             }
                         },

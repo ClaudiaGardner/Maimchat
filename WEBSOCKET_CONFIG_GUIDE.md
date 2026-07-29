@@ -293,6 +293,47 @@ Amaidesu 相同语义的 `speech / emotion / action(parameters)` 放入
 `TapBody` 或 `Idle`。带有 `voice`/`voiceurl` 的回复在扬声器播放期间会自动驱动模型
 配置的 LipSync 参数。
 
+#### 6. 按需摄像头快照
+
+用户必须先在 App 的“更多操作”中开启“允许 MaiBot 按需拍照”。开启后服务端可以发送
+控制段；每个请求只拍摄一张 JPEG，不会持续录像：
+
+```json
+{
+  "message_info": {
+    "platform": "maibot",
+    "message_id": "camera_command_1",
+    "time": 1722222224.0,
+    "sender_info": {
+      "user_info": {
+        "platform": "maibot",
+        "user_id": "maibot",
+        "user_nickname": "MaiBot"
+      }
+    }
+  },
+  "message_segment": {
+    "type": "device_request",
+    "data": "{\"request_id\":\"vision-42\",\"action\":\"request_image\",\"camera\":\"front\"}"
+  }
+}
+```
+
+`camera` 支持 `front` 和 `back`（也兼容 `environment`）。Android 回传的图片消息会在
+`additional_config.device_response` 中携带原始 `request_id`：
+
+```json
+{
+  "device_response": {
+    "request_id": "vision-42",
+    "type": "camera_snapshot"
+  },
+  "message_type": "image"
+}
+```
+
+未知的设备命令会被拒绝；当前只允许 `camera_snapshot` / `request_image`。
+
 ## 连接状态监听
 
 ```kotlin

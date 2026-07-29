@@ -13,6 +13,8 @@ import android.os.Messenger
 import android.os.RemoteException
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
+import com.l2dchat.chat.DeviceRequest
+import com.l2dchat.chat.DeviceRequestCodec
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
@@ -63,6 +65,8 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                                         msg.data.getBoolean(
                                                 ChatServiceProtocol.EXTRA_IS_SPEAKING
                                         )
+                        ChatServiceProtocol.MSG_EVENT_DEVICE_REQUEST ->
+                                handleDeviceRequest(msg.data)
                         ChatServiceProtocol.MSG_EVENT_ERROR -> {
                             msg.data
                                     .getString(ChatServiceProtocol.EXTRA_ERROR_MESSAGE)
@@ -120,6 +124,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     private val _isSpeaking = MutableStateFlow(false)
     private var motionCallback: ((String, Int, Boolean) -> Unit)? = null
     private var avatarIntentCallback: ((AvatarIntent) -> Unit)? = null
+    private var deviceRequestCallback: ((DeviceRequest) -> Unit)? = null
 
     val connectionState: StateFlow<ChatConnectionState> = _connectionState.asStateFlow()
     val connectionLabel: StateFlow<String> = _connectionLabel.asStateFlow()
@@ -218,21 +223,24 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         )
     }
 
-    fun sendImage(file: File) {
-        sendMediaFile("image", file)
+    fun sendImage(file: File, requestId: String? = null) {
+        sendMediaFile("image", file, requestId)
     }
 
     fun sendVoice(file: File) {
         sendMediaFile("voice", file)
     }
 
-    private fun sendMediaFile(type: String, file: File) {
+    private fun sendMediaFile(type: String, file: File, requestId: String? = null) {
         require(type == "image" || type == "voice") { "Unsupported media type: $type" }
         sendCommand(
                 ChatServiceProtocol.MSG_SEND_MEDIA,
                 Bundle().apply {
                     putString(ChatServiceProtocol.EXTRA_MEDIA_TYPE, type)
                     putString(ChatServiceProtocol.EXTRA_MEDIA_FILE_PATH, file.absolutePath)
+                    requestId?.let {
+                        putString(ChatServiceProtocol.EXTRA_MEDIA_REQUEST_ID, it)
+                    }
                 }
         )
     }
@@ -304,6 +312,10 @@ class ChatServiceClient(context: Context) : ServiceConnection {
 
     fun setAvatarIntentCallback(callback: (AvatarIntent) -> Unit) {
         avatarIntentCallback = callback
+    }
+
+    fun setDeviceRequestCallback(callback: ((DeviceRequest) -> Unit)?) {
+        deviceRequestCallback = callback
     }
 
     fun requestSnapshot() {
@@ -379,6 +391,12 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         val payload =
                 data.getString(ChatServiceProtocol.EXTRA_AVATAR_INTENT_JSON) ?: return
         AvatarIntentCodec.parse(payload)?.let { avatarIntentCallback?.invoke(it) }
+    }
+
+    private fun handleDeviceRequest(data: Bundle) {
+        val payload =
+                data.getString(ChatServiceProtocol.EXTRA_DEVICE_REQUEST_JSON) ?: return
+        DeviceRequestCodec.parse(payload)?.let { deviceRequestCallback?.invoke(it) }
     }
 
     private fun handleSnapshot(data: Bundle) {
@@ -473,6 +491,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_EVENT_MOTION -> "MSG_EVENT_MOTION"
                 ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT -> "MSG_EVENT_AVATAR_INTENT"
                 ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE -> "MSG_EVENT_SPEAKING_STATE"
+                ChatServiceProtocol.MSG_EVENT_DEVICE_REQUEST -> "MSG_EVENT_DEVICE_REQUEST"
                 ChatServiceProtocol.MSG_SET_ACTIVE_MODEL -> "MSG_SET_ACTIVE_MODEL"
                 else -> "MSG_UNKNOWN_$what"
             }

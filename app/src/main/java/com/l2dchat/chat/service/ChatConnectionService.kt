@@ -15,6 +15,8 @@ import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.ChatWebSocketManager
 import com.l2dchat.chat.ChatWebSocketManager.ChatMessage
 import com.l2dchat.chat.ChatWebSocketManager.ConnectionState
+import com.l2dchat.chat.DeviceRequest
+import com.l2dchat.chat.DeviceRequestCodec
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
@@ -81,6 +83,7 @@ class ChatConnectionService : Service() {
             broadcastMotion(group, index, loop)
         }
         manager.setAvatarIntentCallback { intent -> broadcastAvatarIntent(intent) }
+        manager.setDeviceRequestCallback { request -> broadcastDeviceRequest(request) }
         manager.setActiveModel(applicationContext, restoreModelName())
         applyStoredConfiguration()
         startObservers()
@@ -202,6 +205,17 @@ class ChatConnectionService : Service() {
         sendToClients(ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT, bundle)
     }
 
+    private fun broadcastDeviceRequest(request: DeviceRequest) {
+        val bundle =
+                Bundle().apply {
+                    putString(
+                            ChatServiceProtocol.EXTRA_DEVICE_REQUEST_JSON,
+                            DeviceRequestCodec.toJson(request)
+                    )
+                }
+        sendToClients(ChatServiceProtocol.MSG_EVENT_DEVICE_REQUEST, bundle)
+    }
+
     private fun broadcastSpeakingState(target: Messenger? = null) {
         val bundle =
                 Bundle().apply {
@@ -312,6 +326,7 @@ class ChatConnectionService : Service() {
     private fun handleSendMedia(data: Bundle) {
         val type = data.getString(ChatServiceProtocol.EXTRA_MEDIA_TYPE)
         val path = data.getString(ChatServiceProtocol.EXTRA_MEDIA_FILE_PATH)
+        val requestId = data.getString(ChatServiceProtocol.EXTRA_MEDIA_REQUEST_ID)
         if (type !in setOf("image", "voice") || path.isNullOrBlank()) {
             notifyError("媒体消息参数无效")
             return
@@ -337,7 +352,7 @@ class ChatConnectionService : Service() {
                             )
                         }
                 when (mediaType) {
-                    "image" -> manager.sendImageMessage(payload)
+                    "image" -> manager.sendImageMessage(payload, requestId)
                     "voice" -> manager.sendVoiceMessage(payload)
                 }
             } catch (error: Throwable) {
