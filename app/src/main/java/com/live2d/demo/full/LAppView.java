@@ -78,7 +78,10 @@ public class LAppView implements AutoCloseable {
 
     @Override
     public void close() {
-        spriteShader.close();
+        if (spriteShader != null) {
+            spriteShader.close();
+            spriteShader = null;
+        }
     }
 
     // ビューを初期化する
@@ -119,6 +122,9 @@ public class LAppView implements AutoCloseable {
                 MaxLogicalView.BOTTOM.getValue(),
                 MaxLogicalView.TOP.getValue());
 
+        if (spriteShader != null) {
+            spriteShader.close();
+        }
         spriteShader = new LAppSpriteShader();
 
         if (!Live2DViewTransformStore.INSTANCE.restoreInto(transformContextKey, viewMatrix)) {
@@ -139,7 +145,7 @@ public class LAppView implements AutoCloseable {
         int maxWidth = LAppDelegate.getInstance().getWindowWidth();
         int maxHeight = LAppDelegate.getInstance().getWindowHeight();
 
-        if (backSprite != null && spriteShader != null) {
+        if (backSprite != null && spriteShader != null && spriteShader.getShaderId() != 0) {
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             GLES20.glDisable(GLES20.GL_CULL_FACE);
@@ -489,7 +495,7 @@ public class LAppView implements AutoCloseable {
     }
 
     private void updateBackgroundSprite() {
-        if (spriteShader == null) {
+        if (spriteShader == null || spriteShader.getShaderId() == 0) {
             Log.d(TAG, "updateBackgroundSprite: spriteShader 尚未初始化");
             return;
         }

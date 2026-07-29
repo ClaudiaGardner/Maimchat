@@ -2,13 +2,32 @@ package com.live2d.demo.full;
 
 import android.opengl.GLES20;
 
-import com.live2d.demo.LAppDefine;
 import com.live2d.sdk.cubism.framework.utils.CubismDebug;
 
 /**
  * スプライト用のシェーダー設定を保持するクラス
  */
 public class LAppSpriteShader implements AutoCloseable {
+    private static final String VERTEX_SHADER_SOURCE =
+        "#version 100\n"
+            + "attribute vec3 position;\n"
+            + "attribute vec2 uv;\n"
+            + "varying vec2 vuv;\n"
+            + "void main(void) {\n"
+            + "    gl_Position = vec4(position, 1.0);\n"
+            + "    vuv = uv;\n"
+            + "}\n";
+
+    private static final String FRAGMENT_SHADER_SOURCE =
+        "#version 100\n"
+            + "precision mediump float;\n"
+            + "varying vec2 vuv;\n"
+            + "uniform sampler2D texture;\n"
+            + "uniform vec4 baseColor;\n"
+            + "void main(void) {\n"
+            + "    gl_FragColor = texture2D(texture, vuv) * baseColor;\n"
+            + "}\n";
+
     /**
      * コンストラクタ
      */
@@ -18,7 +37,9 @@ public class LAppSpriteShader implements AutoCloseable {
 
     @Override
     public void close() {
-        GLES20.glDeleteShader(programId);
+        if (programId != 0) {
+            GLES20.glDeleteProgram(programId);
+        }
     }
 
     /**
@@ -36,18 +57,19 @@ public class LAppSpriteShader implements AutoCloseable {
      * @return シェーダーID。正常に作成できなかった場合は0を返す。
      */
     private int createShader() {
-        // シェーダーのパスの作成
-        String vertShaderFile = LAppDefine.ResourcePath.SHADER_ROOT.getPath();
-        vertShaderFile += ("/" + LAppDefine.ResourcePath.VERT_SHADER.getPath());
-
-        String fragShaderFile = LAppDefine.ResourcePath.SHADER_ROOT.getPath();
-        fragShaderFile += ("/" + LAppDefine.ResourcePath.FRAG_SHADER.getPath());
-
-        // シェーダーのコンパイル
-        int vertexShaderId = compileShader(vertShaderFile, GLES20.GL_VERTEX_SHADER);
-        int fragmentShaderId = compileShader(fragShaderFile, GLES20.GL_FRAGMENT_SHADER);
+        // Keep these tiny shaders in code. The project intentionally does not bundle the separately
+        // distributed Cubism sample asset directory, and user-selected backgrounds still need a
+        // reliable sprite program.
+        int vertexShaderId = compileShader(VERTEX_SHADER_SOURCE, GLES20.GL_VERTEX_SHADER);
+        int fragmentShaderId = compileShader(FRAGMENT_SHADER_SOURCE, GLES20.GL_FRAGMENT_SHADER);
 
         if (vertexShaderId == 0 || fragmentShaderId == 0) {
+            if (vertexShaderId != 0) {
+                GLES20.glDeleteShader(vertexShaderId);
+            }
+            if (fragmentShaderId != 0) {
+                GLES20.glDeleteShader(fragmentShaderId);
+            }
             return 0;
         }
 
@@ -59,12 +81,20 @@ public class LAppSpriteShader implements AutoCloseable {
         GLES20.glAttachShader(programId, fragmentShaderId);
 
         GLES20.glLinkProgram(programId);
-        GLES20.glUseProgram(programId);
 
         // 不要になったシェーダーオブジェクトの削除
         GLES20.glDeleteShader(vertexShaderId);
         GLES20.glDeleteShader(fragmentShaderId);
 
+        int[] status = new int[1];
+        GLES20.glGetProgramiv(programId, GLES20.GL_LINK_STATUS, status, 0);
+        if (status[0] == GLES20.GL_FALSE) {
+            CubismDebug.cubismLogError("Shader link log: %s", GLES20.glGetProgramInfoLog(programId));
+            GLES20.glDeleteProgram(programId);
+            return 0;
+        }
+
+        GLES20.glUseProgram(programId);
         return programId;
     }
 
@@ -99,17 +129,14 @@ public class LAppSpriteShader implements AutoCloseable {
      * シェーダーをコンパイルする。
      * コンパイルに成功したら0を返す。
      *
-     * @param fileName シェーダーファイル名
+     * @param source シェーダーソース
      * @param shaderType 作成するシェーダーの種類
      * @return シェーダーID。正常に作成できなかった場合は0を返す。
      */
-    private int compileShader(String fileName, int shaderType) {
-        // ファイル読み込み
-        byte[] shaderBuffer = LAppPal.loadFileAsBytes(fileName);
-
+    private int compileShader(String source, int shaderType) {
         // コンパイル
         int shaderId = GLES20.glCreateShader(shaderType);
-        GLES20.glShaderSource(shaderId, new String(shaderBuffer));
+        GLES20.glShaderSource(shaderId, source);
         GLES20.glCompileShader(shaderId);
 
         if (!checkShader(shaderId)) {

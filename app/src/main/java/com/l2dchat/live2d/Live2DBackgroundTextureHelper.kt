@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import com.l2dchat.wallpaper.WallpaperComm
-import com.live2d.demo.LAppDefine
 import com.live2d.demo.full.LAppDelegate
 import com.live2d.demo.full.LAppTextureManager
 import com.live2d.demo.full.LAppView
@@ -111,16 +110,13 @@ object Live2DBackgroundTextureHelper {
         try {
             textureManager.deleteTexture(BACKGROUND_TEXTURE_KEY)
         } catch (_: Throwable) {}
-        val defaultPath = LAppDefine.ResourcePath.BACK_IMAGE.getPath()
-        val textureInfo =
-                try {
-                    textureManager.createTextureFromPngFile(defaultPath)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "加载默认背景失败: $defaultPath", t)
-                    null
-                }
-        view.setBackgroundTextureInfo(textureInfo)
+        // The upstream Cubism sample background is not distributed with this project. Keep the GL
+        // surface transparent until the user selects a background instead of repeatedly trying to
+        // load a non-existent, separately licensed sample asset.
+        view.setBackgroundTextureInfo(null)
+        Log.d(TAG, "使用透明默认背景")
     }
+
     private fun adjustBitmapForView(bitmap: Bitmap): Bitmap {
         val delegate = LAppDelegate.getInstance()
         val targetWidth = delegate?.windowWidth ?: 0
