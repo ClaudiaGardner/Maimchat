@@ -12,6 +12,10 @@ import android.os.Process
 import android.os.RemoteException
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
+import com.l2dchat.chat.CallAudioPayload
+import com.l2dchat.chat.CallRuntimePhase
+import com.l2dchat.chat.CallStatePayload
+import com.l2dchat.chat.CallTtsRequest
 import com.l2dchat.chat.ChatWebSocketManager
 import com.l2dchat.chat.ChatWebSocketManager.ChatMessage
 import com.l2dchat.chat.ChatWebSocketManager.ConnectionState
@@ -22,14 +26,18 @@ import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.media.DeviceAudioPlayer
 import com.l2dchat.media.DeviceMediaPayloadEncoder
+import com.l2dchat.media.DeviceTextToSpeechPlayer
 import com.l2dchat.wallpaper.WallpaperComm
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -45,8 +53,25 @@ class ChatConnectionService : Service() {
 
     private lateinit var manager: ChatWebSocketManager
     private lateinit var audioPlayer: DeviceAudioPlayer
+    private lateinit var systemTtsPlayer: DeviceTextToSpeechPlayer
     private var speakerEnabled: Boolean = true
     private var isSpeaking: Boolean = false
+    private var callModeActive: Boolean = false
+    private var callVideoEnabled: Boolean = false
+    private var callPhase: CallRuntimePhase = CallRuntimePhase.IDLE
+    private var callStateDetail: String? = null
+    private var pendingTurnId: String? = null
+    private var pendingTtsRequestId: String? = null
+    private var pendingReplyText: String? = null
+    private var currentSpeechText: String? = null
+    private var currentSpeechRequestId: String? = null
+    private var preparingRemoteAudio: Boolean = false
+    private var lastVoiceReceivedAt: Long = 0L
+    private var turnTimeoutJob: Job? = null
+    private var ttsTimeoutJob: Job? = null
+    private var botTextSettleJob: Job? = null
+    private var pendingBotSpeech: String = ""
+    private var pendingBotReplyMessageId: String? = null
 
     private var lastKnownUrl: String? = null
     private var lastKnownPlatform: String? = null
@@ -61,24 +86,26 @@ class ChatConnectionService : Service() {
         audioPlayer =
                 DeviceAudioPlayer(
                         context = applicationContext,
-                        onPlaybackError = { error -> notifyError(error) },
+                        onPlaybackError = ::handleRemotePlaybackError,
+                        onPlaybackStateChanged = ::handlePlaybackStateChanged
+                )
+        systemTtsPlayer =
+                DeviceTextToSpeechPlayer(
+                        context = applicationContext,
+                        onPlaybackError = { error ->
+                            serviceScope.launch { handleSystemTtsError(error) }
+                        },
                         onPlaybackStateChanged = { speaking ->
-                            isSpeaking = speaking
-                            broadcastSpeakingState()
+                            serviceScope.launch { handlePlaybackStateChanged(speaking) }
                         }
                 )
         speakerEnabled =
                 getSharedPreferences(CHAT_PREFS, MODE_PRIVATE)
                         .getBoolean(KEY_SPEAKER_ENABLED, true)
-        manager.setVoiceReceivedCallback { payload ->
-            if (speakerEnabled) {
-                serviceScope.launch {
-                    audioPlayer.play(payload).onFailure { error ->
-                        notifyError("语音播放失败：${error.message ?: "未知错误"}")
-                    }
-                }
-            }
-        }
+        manager.setVoiceReceivedCallback(::handleVoicePayload)
+        manager.setBotTextReceivedCallback(::handleBotTextReceived)
+        manager.setCallAudioReceivedCallback(::handleCallAudioReceived)
+        manager.setCallStateReceivedCallback(::handleCallStateReceived)
         manager.setMotionTriggerCallback { group, index, loop ->
             broadcastMotion(group, index, loop)
         }
@@ -102,7 +129,11 @@ class ChatConnectionService : Service() {
         logger.info("ChatConnectionService destroyed")
         serviceScope.cancel()
         clients.clear()
+        turnTimeoutJob?.cancel()
+        ttsTimeoutJob?.cancel()
+        botTextSettleJob?.cancel()
         audioPlayer.stop()
+        systemTtsPlayer.shutdown()
         manager.disconnect()
     }
 
@@ -154,6 +185,299 @@ class ChatConnectionService : Service() {
             }
         }
         serviceScope.launch { manager.errors.collect { message -> notifyError(message) } }
+    }
+
+    private fun handleVoicePayload(payload: String) {
+        lastVoiceReceivedAt = System.currentTimeMillis()
+        if (callModeActive) {
+            turnTimeoutJob?.cancel()
+            ttsTimeoutJob?.cancel()
+            botTextSettleJob?.cancel()
+            pendingBotSpeech = ""
+            pendingBotReplyMessageId = null
+            pendingTtsRequestId = null
+            pendingReplyText = null
+        }
+        if (!speakerEnabled) {
+            finishCallTurn()
+            return
+        }
+        playRemoteAudio(payload, currentSpeechText, currentSpeechRequestId)
+    }
+
+    private fun handleBotTextReceived(message: ChatMessage, includesVoice: Boolean) {
+        if (!callModeActive) return
+        turnTimeoutJob?.cancel()
+        val speech = cleanReplyText(message.content)
+        if (speech.isBlank()) {
+            finishCallTurn()
+            return
+        }
+        if (includesVoice ||
+                        System.currentTimeMillis() - lastVoiceReceivedAt <
+                                LEGACY_VOICE_DEDUP_WINDOW_MS
+        ) {
+            pendingReplyText = speech
+            if (!isSpeaking) finishCallTurn()
+            return
+        }
+        if (!speakerEnabled) {
+            finishCallTurn()
+            return
+        }
+        queueBotSpeech(speech, message.id)
+    }
+
+    private fun queueBotSpeech(speech: String, replyMessageId: String) {
+        pendingBotSpeech = mergeReplyChunks(pendingBotSpeech, speech)
+        pendingBotReplyMessageId = replyMessageId
+        updateCallState(CallRuntimePhase.THINKING, "正在整理回复")
+        botTextSettleJob?.cancel()
+        botTextSettleJob =
+                serviceScope.launch {
+                    delay(BOT_TEXT_SETTLE_MS)
+                    val settledSpeech = pendingBotSpeech
+                    val settledMessageId = pendingBotReplyMessageId ?: replyMessageId
+                    pendingBotSpeech = ""
+                    pendingBotReplyMessageId = null
+                    requestRemoteTts(settledSpeech, settledMessageId)
+                }
+    }
+
+    private fun requestRemoteTts(speech: String, replyMessageId: String) {
+        if (!callModeActive || !speakerEnabled || speech.isBlank()) {
+            finishCallTurn()
+            return
+        }
+        val requestId = "tts-${UUID.randomUUID()}"
+        pendingTtsRequestId = requestId
+        pendingReplyText = speech
+        updateCallState(CallRuntimePhase.SYNTHESIZING, "正在生成回复语音")
+        manager.sendCallTtsRequest(
+                CallTtsRequest(
+                        requestId = requestId,
+                        turnId = pendingTurnId,
+                        replyMessageId = replyMessageId,
+                        text = speech
+                )
+        )
+        ttsTimeoutJob?.cancel()
+        ttsTimeoutJob =
+                serviceScope.launch {
+                    delay(REMOTE_TTS_TIMEOUT_MS)
+                    if (pendingTtsRequestId == requestId) {
+                        logger.warn("远端 TTS 等待超时，切换到 Android 系统语音")
+                        fallbackToSystemTts("远端语音等待超时")
+                    }
+                }
+    }
+
+    private fun mergeReplyChunks(current: String, incoming: String): String {
+        if (current.isBlank()) return incoming
+        if (incoming == current || current.endsWith(incoming)) return current
+        if (incoming.startsWith(current)) return incoming
+        val separator =
+                if (current.last().isLetterOrDigit() &&
+                                incoming.first().isLetterOrDigit() &&
+                                current.last().code < 128 &&
+                                incoming.first().code < 128
+                ) {
+                    " "
+                } else {
+                    ""
+                }
+        return (current + separator + incoming).take(MAX_TTS_TEXT_CHARS)
+    }
+
+    private fun handleCallAudioReceived(payload: CallAudioPayload) {
+        if (!callModeActive || payload.requestId != pendingTtsRequestId) {
+            logger.debug(
+                    "忽略过期通话音频 request=${payload.requestId} pending=$pendingTtsRequestId",
+                    throttleMs = 1_000L,
+                    throttleKey = "stale_call_audio"
+            )
+            return
+        }
+        ttsTimeoutJob?.cancel()
+        pendingTtsRequestId = null
+        val speech = payload.text.ifBlank { pendingReplyText.orEmpty() }
+        pendingReplyText = null
+        playRemoteAudio(payload.audio, speech, payload.requestId)
+    }
+
+    private fun handleCallStateReceived(payload: CallStatePayload) {
+        if (!callModeActive ||
+                        payload.phase != CallRuntimePhase.ERROR ||
+                        payload.requestId != pendingTtsRequestId
+        ) {
+            return
+        }
+        logger.warn("远端通话语音失败：${payload.message ?: "未知错误"}")
+        serviceScope.launch {
+            fallbackToSystemTts(payload.message ?: "远端语音生成失败")
+        }
+    }
+
+    private fun playRemoteAudio(payload: String, speech: String?, requestId: String?) {
+        if (!speakerEnabled) {
+            finishCallTurn()
+            return
+        }
+        preparingRemoteAudio = true
+        currentSpeechText = speech
+        currentSpeechRequestId = requestId
+        systemTtsPlayer.stop()
+        serviceScope.launch {
+            audioPlayer.play(payload).onFailure { error ->
+                preparingRemoteAudio = false
+                if (!currentSpeechText.isNullOrBlank() && callModeActive) {
+                    logger.warn("远端语音无法播放，切换到 Android 系统语音", error)
+                    fallbackToSystemTts("远端音频播放失败")
+                } else {
+                    notifyError("语音播放失败：${error.message ?: "未知错误"}")
+                    finishCallTurn()
+                }
+            }
+        }
+    }
+
+    private fun handleRemotePlaybackError(error: String) {
+        val canFallback = !currentSpeechText.isNullOrBlank() && callModeActive
+        if (canFallback) preparingRemoteAudio = true
+        serviceScope.launch {
+            if (canFallback) {
+                logger.warn("$error，切换到 Android 系统语音")
+                fallbackToSystemTts(error)
+            } else {
+                notifyError(error)
+                finishCallTurn()
+            }
+        }
+    }
+
+    private suspend fun fallbackToSystemTts(reason: String) {
+        val speech = pendingReplyText ?: currentSpeechText
+        val requestId =
+                pendingTtsRequestId
+                        ?: currentSpeechRequestId
+                        ?: "local-tts-${UUID.randomUUID()}"
+        ttsTimeoutJob?.cancel()
+        pendingTtsRequestId = null
+        pendingReplyText = null
+        if (speech.isNullOrBlank() || !speakerEnabled || !callModeActive) {
+            finishCallTurn()
+            return
+        }
+
+        preparingRemoteAudio = true
+        currentSpeechText = speech
+        currentSpeechRequestId = requestId
+        audioPlayer.stop()
+        updateCallState(CallRuntimePhase.SYNTHESIZING, "$reason，使用设备语音")
+        var lastError: Throwable? = null
+        repeat(SYSTEM_TTS_READY_RETRIES) {
+            val result = systemTtsPlayer.speak(speech, requestId)
+            if (result.isSuccess) {
+                preparingRemoteAudio = false
+                return
+            }
+            lastError = result.exceptionOrNull()
+            delay(SYSTEM_TTS_RETRY_DELAY_MS)
+        }
+        preparingRemoteAudio = false
+        val message = "回复语音播放失败：${lastError?.message ?: "系统语音不可用"}"
+        notifyError(message)
+        updateCallState(CallRuntimePhase.ERROR, message)
+        delay(ERROR_STATE_HOLD_MS)
+        finishCallTurn()
+    }
+
+    private fun handleSystemTtsError(error: String) {
+        if (currentSpeechText.isNullOrBlank()) {
+            logger.warn(error)
+            return
+        }
+        preparingRemoteAudio = false
+        isSpeaking = false
+        broadcastSpeakingState()
+        notifyError(error)
+        updateCallState(CallRuntimePhase.ERROR, error)
+        serviceScope.launch {
+            delay(ERROR_STATE_HOLD_MS)
+            finishCallTurn()
+        }
+    }
+
+    private fun handlePlaybackStateChanged(speaking: Boolean) {
+        isSpeaking = speaking
+        broadcastSpeakingState()
+        if (!callModeActive) return
+        if (speaking) {
+            preparingRemoteAudio = false
+            updateCallState(CallRuntimePhase.SPEAKING, "正在回应")
+        } else if (!preparingRemoteAudio) {
+            currentSpeechText = null
+            currentSpeechRequestId = null
+            finishCallTurn()
+        }
+    }
+
+    private fun beginCallTurn(turnId: String) {
+        if (!callModeActive) return
+        pendingTurnId = turnId
+        pendingTtsRequestId = null
+        pendingReplyText = null
+        botTextSettleJob?.cancel()
+        pendingBotSpeech = ""
+        pendingBotReplyMessageId = null
+        turnTimeoutJob?.cancel()
+        ttsTimeoutJob?.cancel()
+        updateCallState(CallRuntimePhase.THINKING, "正在思考")
+        turnTimeoutJob =
+                serviceScope.launch {
+                    delay(BOT_REPLY_TIMEOUT_MS)
+                    if (callModeActive &&
+                                    pendingTurnId == turnId &&
+                                    callPhase == CallRuntimePhase.THINKING
+                    ) {
+                        updateCallState(CallRuntimePhase.ERROR, "这次回复等待超时")
+                        delay(ERROR_STATE_HOLD_MS)
+                        finishCallTurn()
+                    }
+                }
+    }
+
+    private fun finishCallTurn() {
+        turnTimeoutJob?.cancel()
+        ttsTimeoutJob?.cancel()
+        botTextSettleJob?.cancel()
+        pendingTurnId = null
+        pendingTtsRequestId = null
+        pendingReplyText = null
+        pendingBotSpeech = ""
+        pendingBotReplyMessageId = null
+        if (callModeActive) {
+            updateCallState(CallRuntimePhase.LISTENING, "正在聆听")
+        } else {
+            updateCallState(CallRuntimePhase.IDLE, null)
+        }
+    }
+
+    private fun cleanReplyText(value: String): String {
+        val text = value.trim()
+        if (text.matches(Regex("^\\[[^]]+]$"))) return ""
+        return text.take(MAX_TTS_TEXT_CHARS)
+    }
+
+    private fun updateCallState(phase: CallRuntimePhase, detail: String?) {
+        if (callPhase == phase && callStateDetail == detail) return
+        callPhase = phase
+        callStateDetail = detail
+        logger.info(
+                "通话状态=$phase turn=${pendingTurnId ?: "-"} " +
+                        "tts=${pendingTtsRequestId ?: "-"} detail=${detail ?: "-"}"
+        )
+        broadcastCallState()
     }
 
     private fun broadcastConnectionState(state: ConnectionState) {
@@ -225,6 +549,23 @@ class ChatConnectionService : Service() {
             sendToClient(target, ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE, bundle)
         } else {
             sendToClients(ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE, bundle)
+        }
+    }
+
+    private fun broadcastCallState(target: Messenger? = null) {
+        val bundle =
+                Bundle().apply {
+                    putBoolean(ChatServiceProtocol.EXTRA_CALL_ACTIVE, callModeActive)
+                    putBoolean(ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED, callVideoEnabled)
+                    putString(ChatServiceProtocol.EXTRA_CALL_PHASE, callPhase.name)
+                    putString(ChatServiceProtocol.EXTRA_CALL_TURN_ID, pendingTurnId)
+                    putString(ChatServiceProtocol.EXTRA_CALL_TTS_REQUEST_ID, pendingTtsRequestId)
+                    putString(ChatServiceProtocol.EXTRA_CALL_STATE_DETAIL, callStateDetail)
+                }
+        if (target != null) {
+            sendToClient(target, ChatServiceProtocol.MSG_EVENT_CALL_STATE, bundle)
+        } else {
+            sendToClients(ChatServiceProtocol.MSG_EVENT_CALL_STATE, bundle)
         }
     }
 
@@ -320,7 +661,9 @@ class ChatConnectionService : Service() {
             return
         }
         ensureConnected()
-        manager.sendUserMessage(text)
+        val turnId = if (callModeActive) newCallTurnId() else null
+        manager.sendUserMessage(text, turnId)
+        turnId?.let(::beginCallTurn)
     }
 
     private fun handleSendMedia(data: Bundle) {
@@ -333,6 +676,8 @@ class ChatConnectionService : Service() {
         }
         val mediaType = requireNotNull(type)
         val mediaPath = path
+        val callTurnId =
+                if (mediaType == "voice" && callModeActive) newCallTurnId() else null
         if (manager.connectionState.value != ConnectionState.CONNECTED) {
             ensureConnected()
             File(mediaPath).delete()
@@ -353,7 +698,10 @@ class ChatConnectionService : Service() {
                         }
                 when (mediaType) {
                     "image" -> manager.sendImageMessage(payload, requestId)
-                    "voice" -> manager.sendVoiceMessage(payload)
+                    "voice" -> {
+                        manager.sendVoiceMessage(payload, callTurnId)
+                        callTurnId?.let(::beginCallTurn)
+                    }
                 }
             } catch (error: Throwable) {
                 notifyError("发送${if (mediaType == "image") "照片" else "语音"}失败：${error.message ?: "未知错误"}")
@@ -372,6 +720,7 @@ class ChatConnectionService : Service() {
         }
         val imageFile = File(imagePath)
         val voiceFile = File(voicePath)
+        val callTurnId = newCallTurnId()
         if (manager.connectionState.value != ConnectionState.CONNECTED) {
             ensureConnected()
             imageFile.delete()
@@ -395,7 +744,8 @@ class ChatConnectionService : Service() {
                                             voicePath
                                     )
                         }
-                manager.sendCallTurnMessage(imagePayload, voicePayload)
+                manager.sendCallTurnMessage(imagePayload, voicePayload, callTurnId)
+                beginCallTurn(callTurnId)
             } catch (error: Throwable) {
                 notifyError("发送通话消息失败：${error.message ?: "未知错误"}")
             } finally {
@@ -414,8 +764,43 @@ class ChatConnectionService : Service() {
                 .edit()
                 .putBoolean(KEY_SPEAKER_ENABLED, speakerEnabled)
                 .apply()
-        if (!speakerEnabled) audioPlayer.stop()
+        if (!speakerEnabled) {
+            audioPlayer.stop()
+            systemTtsPlayer.stop()
+            finishCallTurn()
+        }
     }
+
+    private fun handleCallMode(data: Bundle) {
+        val active = data.getBoolean(ChatServiceProtocol.EXTRA_CALL_ACTIVE, false)
+        val video = data.getBoolean(ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED, false)
+        callModeActive = active
+        callVideoEnabled = active && video
+        if (active) {
+            if (isSpeaking) {
+                updateCallState(CallRuntimePhase.SPEAKING, "正在回应")
+            } else if (pendingTtsRequestId != null) {
+                updateCallState(CallRuntimePhase.SYNTHESIZING, "正在生成回复语音")
+            } else if (pendingTurnId != null) {
+                updateCallState(CallRuntimePhase.THINKING, "正在思考")
+            } else {
+                updateCallState(CallRuntimePhase.LISTENING, "正在聆听")
+            }
+        } else {
+            turnTimeoutJob?.cancel()
+            ttsTimeoutJob?.cancel()
+            botTextSettleJob?.cancel()
+            pendingTurnId = null
+            pendingTtsRequestId = null
+            pendingReplyText = null
+            pendingBotSpeech = ""
+            pendingBotReplyMessageId = null
+            updateCallState(CallRuntimePhase.IDLE, null)
+        }
+        broadcastCallState()
+    }
+
+    private fun newCallTurnId(): String = "turn-${UUID.randomUUID()}"
 
     private fun handleConnectRequest(data: Bundle) {
         val url =
@@ -535,6 +920,7 @@ class ChatConnectionService : Service() {
                         service.sendSnapshot(it)
                         service.broadcastConnectionState(service.manager.connectionState.value)
                         service.broadcastSpeakingState(it)
+                        service.broadcastCallState(it)
                     }
                 }
                 ChatServiceProtocol.MSG_UNREGISTER_CLIENT -> {
@@ -557,6 +943,7 @@ class ChatConnectionService : Service() {
                         service.handleSendCallTurn(msg.data)
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED ->
                         service.handleSpeakerEnabled(msg.data)
+                ChatServiceProtocol.MSG_SET_CALL_MODE -> service.handleCallMode(msg.data)
                 else -> super.handleMessage(msg)
             }
         }
@@ -571,5 +958,13 @@ class ChatConnectionService : Service() {
         private const val KEY_RECEIVER_ID = "receiver_user_id"
         private const val KEY_RECEIVER_NICKNAME = "receiver_user_nickname"
         private const val KEY_SPEAKER_ENABLED = "speaker_enabled"
+        private const val MAX_TTS_TEXT_CHARS = 240
+        private const val LEGACY_VOICE_DEDUP_WINDOW_MS = 8_000L
+        private const val REMOTE_TTS_TIMEOUT_MS = 45_000L
+        private const val BOT_REPLY_TIMEOUT_MS = 90_000L
+        private const val BOT_TEXT_SETTLE_MS = 2_800L
+        private const val ERROR_STATE_HOLD_MS = 1_500L
+        private const val SYSTEM_TTS_READY_RETRIES = 20
+        private const val SYSTEM_TTS_RETRY_DELAY_MS = 100L
     }
 }

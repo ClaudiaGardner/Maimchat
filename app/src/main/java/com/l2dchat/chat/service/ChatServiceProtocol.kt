@@ -15,6 +15,7 @@ object ChatServiceProtocol {
     const val MSG_SEND_MEDIA = 11
     const val MSG_SET_SPEAKER_ENABLED = 12
     const val MSG_SEND_CALL_TURN = 13
+    const val MSG_SET_CALL_MODE = 14
 
     // Service -> Client events
     const val MSG_EVENT_CONNECTION_STATE = 101
@@ -26,6 +27,7 @@ object ChatServiceProtocol {
     const val MSG_EVENT_AVATAR_INTENT = 107
     const val MSG_EVENT_SPEAKING_STATE = 108
     const val MSG_EVENT_DEVICE_REQUEST = 109
+    const val MSG_EVENT_CALL_STATE = 110
 
     // Common extras
     const val EXTRA_URL = "extra_url"
@@ -42,6 +44,8 @@ object ChatServiceProtocol {
     const val EXTRA_CALL_IMAGE_FILE_PATH = "extra_call_image_file_path"
     const val EXTRA_CALL_VOICE_FILE_PATH = "extra_call_voice_file_path"
     const val EXTRA_SPEAKER_ENABLED = "extra_speaker_enabled"
+    const val EXTRA_CALL_ACTIVE = "extra_call_active"
+    const val EXTRA_CALL_VIDEO_ENABLED = "extra_call_video_enabled"
 
     // Event extras
     const val EXTRA_CONNECTION_STATE = "extra_connection_state"
@@ -60,4 +64,8 @@ object ChatServiceProtocol {
     const val EXTRA_AVATAR_INTENT_JSON = "extra_avatar_intent_json"
     const val EXTRA_IS_SPEAKING = "extra_is_speaking"
     const val EXTRA_DEVICE_REQUEST_JSON = "extra_device_request_json"
+    const val EXTRA_CALL_PHASE = "extra_call_phase"
+    const val EXTRA_CALL_TURN_ID = "extra_call_turn_id"
+    const val EXTRA_CALL_TTS_REQUEST_ID = "extra_call_tts_request_id"
+    const val EXTRA_CALL_STATE_DETAIL = "extra_call_state_detail"
 }

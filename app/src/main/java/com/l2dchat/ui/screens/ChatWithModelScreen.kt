@@ -64,8 +64,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
-import com.l2dchat.chat.MessageBase
+import com.l2dchat.chat.CallRuntimePhase
 import com.l2dchat.chat.DeviceRequest
+import com.l2dchat.chat.MessageBase
 import com.l2dchat.chat.service.ChatServiceClient
 import com.l2dchat.live2d.ImprovedLive2DRenderer
 import com.l2dchat.live2d.Live2DModelLifecycleManager
@@ -143,6 +144,7 @@ fun ChatWithModelScreen(
     val currentUserNickname by chatManager.userNickname.collectAsState()
     val speakerEnabled by chatManager.speakerEnabled.collectAsState()
     val isSpeaking by chatManager.isSpeaking.collectAsState()
+    val callRuntimeState by chatManager.callRuntimeState.collectAsState()
     val prefs =
             remember(context) {
                 context.getSharedPreferences(
@@ -472,6 +474,21 @@ fun ChatWithModelScreen(
     }
 
     val automaticVoiceEnabled = handsFreeVoiceEnabled || showVideoCall
+    val botBusy =
+            callRuntimeState.active &&
+                    callRuntimeState.phase in
+                            setOf(
+                                    CallRuntimePhase.THINKING,
+                                    CallRuntimePhase.SYNTHESIZING,
+                                    CallRuntimePhase.SPEAKING
+                            )
+
+    LaunchedEffect(automaticVoiceEnabled, showVideoCall) {
+        chatManager.setCallMode(
+                active = automaticVoiceEnabled,
+                videoEnabled = automaticVoiceEnabled && showVideoCall
+        )
+    }
 
     LaunchedEffect(automaticVoiceEnabled) {
         if (automaticVoiceEnabled) {
@@ -479,6 +496,7 @@ fun ChatWithModelScreen(
             result.onSuccess {
                 voiceActivityRecorder.setPaused(
                         isSpeaking ||
+                                botBusy ||
                                 videoCallMicrophoneMuted ||
                                 showCameraCapture ||
                                 isRecording ||
@@ -509,6 +527,7 @@ fun ChatWithModelScreen(
             automaticVoiceEnabled,
             handsFreeVoiceState,
             isSpeaking,
+            botBusy,
             connectionState,
             videoCallMicrophoneMuted,
             showCameraCapture,
@@ -517,6 +536,7 @@ fun ChatWithModelScreen(
         if (automaticVoiceEnabled && voiceActivityRecorder.isRunning) {
             voiceActivityRecorder.setPaused(
                     isSpeaking ||
+                            botBusy ||
                             videoCallMicrophoneMuted ||
                             showCameraCapture ||
                             isRecording ||
@@ -827,10 +847,14 @@ fun ChatWithModelScreen(
             when {
                 connectionState != ChatServiceClient.ChatConnectionState.CONNECTED ->
                         chatManager.getConnectionStateDescription()
-                isSpeaking -> "正在回应"
                 companionMicrophoneMuted -> "麦克风已关闭"
                 handsFreeVoiceState == DeviceVoiceActivityRecorder.State.SPEAKING ->
                         "正在听你说话"
+                callRuntimeState.phase == CallRuntimePhase.THINKING -> "正在思考"
+                callRuntimeState.phase == CallRuntimePhase.SYNTHESIZING -> "正在组织声音"
+                callRuntimeState.phase == CallRuntimePhase.SPEAKING || isSpeaking -> "正在回应"
+                callRuntimeState.phase == CallRuntimePhase.ERROR ->
+                        callRuntimeState.detail ?: "这次对话出了点问题"
                 handsFreeVoiceState == DeviceVoiceActivityRecorder.State.PAUSED ->
                         "收音已暂停"
                 else -> "正在聆听"

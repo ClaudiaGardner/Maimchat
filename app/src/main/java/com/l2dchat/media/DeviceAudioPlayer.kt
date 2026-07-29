@@ -78,12 +78,12 @@ class DeviceAudioPlayer(
                                 deleteTemporaryFile()
                             }
                             setOnErrorListener { failed, what, extra ->
+                                onPlaybackError("语音播放失败（$what/$extra）")
                                 updatePlaybackState(false)
                                 failed.reset()
                                 failed.release()
                                 if (player === failed) player = null
                                 deleteTemporaryFile()
-                                onPlaybackError("语音播放失败（$what/$extra）")
                                 true
                             }
                             setOnPreparedListener {

@@ -31,9 +31,6 @@ class ChatWebSocketManager {
         private const val DEFAULT_PLATFORM = ChatPreferenceKeys.DEFAULT_PLATFORM
         private const val MAX_LOG_MESSAGE_CHARS = 512
         private const val DEVICE_REQUEST_MAX_AGE_MS = 30_000L
-        private const val VIDEO_CALL_TURN_INSTRUCTION =
-                "【正在视频通话：请结合当前画面和语音，用一到两句自然口语简短回答；" +
-                        "回复前请调用 maimchat_speak 播放同样内容。】"
     }
     private val logger = L2DLogger.module(LogModule.CHAT)
     private val gson = Gson()
@@ -66,6 +63,9 @@ class ChatWebSocketManager {
     private var onAvatarIntent: ((AvatarIntent) -> Unit)? = null
     private var onDeviceRequest: ((DeviceRequest) -> Unit)? = null
     private var onVoiceReceived: ((String) -> Unit)? = null
+    private var onBotTextReceived: ((ChatMessage, Boolean) -> Unit)? = null
+    private var onCallAudioReceived: ((CallAudioPayload) -> Unit)? = null
+    private var onCallStateReceived: ((CallStatePayload) -> Unit)? = null
     private var userId: String = generateUserId()
     private var userNickname: String? = null
     private var userCardName: String? = null
@@ -367,7 +367,9 @@ class ChatWebSocketManager {
                                                         "emoji",
                                                         "voice",
                                                         "avatar_intent",
-                                                        "device_request"
+                                                        "device_request",
+                                                        "call_audio",
+                                                        "call_state"
                                                 )
                                 ),
                         templateInfo = null,
@@ -381,6 +383,14 @@ class ChatWebSocketManager {
     private fun handleIncomingMessage(text: String) {
         try {
             val standard = MessageBase.fromJsonString(text)
+            if (isSenderMe(standard.messageInfo.senderInfo) && isControlOnly(standard)) {
+                logger.debug(
+                        "忽略设备控制消息回显",
+                        throttleMs = 1_000L,
+                        throttleKey = "control_echo"
+                )
+                return
+            }
             val srvTs = ((standard.messageInfo.time ?: 0.0) * 1000).toLong()
             val isHistorical =
                     srvTs > 0 &&
@@ -406,6 +416,12 @@ class ChatWebSocketManager {
                                 )
                         addMessage(adjusted)
                         if (!fromUser) {
+                            if (adjusted.content.isNotBlank()) {
+                                onBotTextReceived?.invoke(
+                                        adjusted,
+                                        result.voiceData != null
+                                )
+                            }
                             if (isFreshDeviceRequest) {
                                 result.deviceRequest?.let { onDeviceRequest?.invoke(it) }
                             }
@@ -456,6 +472,16 @@ class ChatWebSocketManager {
                         onDeviceRequest?.invoke(result.deviceRequest)
                     }
                 }
+                is Live2DChatMessageHandler.ChatMessageResult.CallAudioProcessed -> {
+                    if (!isHistorical && !isSenderMe(standard.messageInfo.senderInfo)) {
+                        onCallAudioReceived?.invoke(result.payload)
+                    }
+                }
+                is Live2DChatMessageHandler.ChatMessageResult.CallStateProcessed -> {
+                    if (!isHistorical && !isSenderMe(standard.messageInfo.senderInfo)) {
+                        onCallStateReceived?.invoke(result.payload)
+                    }
+                }
                 is Live2DChatMessageHandler.ChatMessageResult.EmojiProcessed -> {}
                 is Live2DChatMessageHandler.ChatMessageResult.Error ->
                         logger.error("消息处理错误: ${result.message}")
@@ -469,8 +495,23 @@ class ChatWebSocketManager {
         }
     }
 
-    fun sendUserMessage(content: String) {
-        val message = buildStandardMessage(listOf(Seg("text", content)), "chat", raw = content)
+    fun sendUserMessage(content: String, callTurnId: String? = null) {
+        val additional =
+                callTurnId?.let {
+                    mapOf(
+                            "call_mode" to true,
+                            "call_turn_id" to it,
+                            "call_media" to "text"
+                    )
+                }
+                        ?: emptyMap()
+        val message =
+                buildStandardMessage(
+                        listOf(Seg("text", content)),
+                        "chat",
+                        raw = content,
+                        additional = additional
+                )
         addMessage(
                 ChatMessage(
                         id = message.messageInfo.messageId!!,
@@ -479,6 +520,14 @@ class ChatWebSocketManager {
                 )
         )
         sendStandardMessage(message)
+    }
+
+    private fun isControlOnly(message: MessageBase): Boolean {
+        val additional = message.messageInfo.additionalConfig.orEmpty()
+        val controlOnly = additional["control_only"]
+        return controlOnly == true ||
+                controlOnly?.toString().equals("true", ignoreCase = true) ||
+                additional["message_type"]?.toString() == "control"
     }
 
     fun sendImageMessage(base64Jpeg: String, requestId: String? = null) {
@@ -496,18 +545,30 @@ class ChatWebSocketManager {
         sendMediaMessage("image", base64Jpeg, "[照片]", additional)
     }
 
-    fun sendVoiceMessage(base64Wav: String) {
-        sendMediaMessage("voice", base64Wav, "[语音]")
+    fun sendVoiceMessage(base64Wav: String, callTurnId: String? = null) {
+        val additional =
+                callTurnId?.let {
+                    mapOf(
+                            "call_mode" to true,
+                            "call_turn_id" to it,
+                            "call_media" to "audio"
+                    )
+                }
+                        ?: emptyMap()
+        sendMediaMessage("voice", base64Wav, "[语音]", additional)
     }
 
-    fun sendCallTurnMessage(base64Jpeg: String, base64Wav: String) {
+    fun sendCallTurnMessage(
+            base64Jpeg: String,
+            base64Wav: String,
+            callTurnId: String
+    ) {
         require(base64Jpeg.isNotBlank()) { "通话画面不能为空" }
         require(base64Wav.isNotBlank()) { "通话语音不能为空" }
         val message =
                 buildStandardMessage(
                         segments =
                                 listOf(
-                                        Seg("text", VIDEO_CALL_TURN_INSTRUCTION),
                                         Seg("image", base64Jpeg),
                                         Seg("voice", base64Wav)
                                 ),
@@ -515,6 +576,7 @@ class ChatWebSocketManager {
                         additional =
                                 mapOf(
                                         "call_mode" to true,
+                                        "call_turn_id" to callTurnId,
                                         "vision_sampling" to "utterance"
                                 )
                 )
@@ -525,6 +587,25 @@ class ChatWebSocketManager {
                         isFromUser = true
                 )
         )
+        sendStandardMessage(message)
+    }
+
+    fun sendCallTtsRequest(request: CallTtsRequest) {
+        val command = CallInteractionCodec.encodeCommand(request)
+        val message =
+                buildStandardMessage(
+                        segments = listOf(Seg("text", command)),
+                        messageType = "control",
+                        raw = command,
+                        additional =
+                                mapOf(
+                                        "control_only" to true,
+                                        "control_type" to "call_tts",
+                                        "call_mode" to true,
+                                        "call_turn_id" to (request.turnId ?: ""),
+                                        "request_id" to request.requestId
+                                )
+                )
         sendStandardMessage(message)
     }
 
@@ -605,6 +686,15 @@ class ChatWebSocketManager {
     }
     fun setVoiceReceivedCallback(callback: (String) -> Unit) {
         onVoiceReceived = callback
+    }
+    fun setBotTextReceivedCallback(callback: (ChatMessage, Boolean) -> Unit) {
+        onBotTextReceived = callback
+    }
+    fun setCallAudioReceivedCallback(callback: (CallAudioPayload) -> Unit) {
+        onCallAudioReceived = callback
+    }
+    fun setCallStateReceivedCallback(callback: (CallStatePayload) -> Unit) {
+        onCallStateReceived = callback
     }
     fun getMessageEvents() = messageHandler.messageEvents
     private fun addMessage(message: ChatMessage) {

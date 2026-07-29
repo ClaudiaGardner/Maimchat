@@ -25,10 +25,20 @@ class Live2DChatMessageHandler {
                             ?: DeviceRequestCodec.fromAdditionalConfig(
                                     message.messageInfo.additionalConfig
                             )
+            val callAudio =
+                    parsed.callAudioPayloads.firstNotNullOfOrNull(
+                            CallInteractionCodec::parseAudio
+                    )
+            val callState =
+                    parsed.callStatePayloads.firstNotNullOfOrNull(
+                            CallInteractionCodec::parseState
+                    )
             if (parsed.getText().isBlank() && !avatarIntent?.speech.isNullOrBlank()) {
                 parsed.addText(requireNotNull(avatarIntent?.speech))
             }
             when {
+                callAudio != null -> ChatMessageResult.CallAudioProcessed(callAudio)
+                callState != null -> ChatMessageResult.CallStateProcessed(callState)
                 parsed.hasVoice() ->
                         handleVoiceMessage(message, parsed, avatarIntent, deviceRequest)
                 parsed.hasImage() ->
@@ -65,6 +75,8 @@ class Live2DChatMessageHandler {
                     content.addAvatarIntent(segment.data.toString())
             "device_request", "image_req" ->
                     content.addDeviceRequest(segment.data.toString())
+            "call_audio" -> content.addCallAudio(segment.data.toString())
+            "call_state" -> content.addCallState(segment.data.toString())
             // MaiBot prepends this control segment when replying to a message. It is routing
             // metadata, not user-visible text.
             "reply" -> Unit
@@ -205,6 +217,10 @@ class Live2DChatMessageHandler {
         data class DeviceRequestProcessed(val deviceRequest: DeviceRequest) :
                 ChatMessageResult()
 
+        data class CallAudioProcessed(val payload: CallAudioPayload) : ChatMessageResult()
+
+        data class CallStateProcessed(val payload: CallStatePayload) : ChatMessageResult()
+
         data class EmojiProcessed(val emojiData: String) : ChatMessageResult()
 
         data class Error(val message: String) : ChatMessageResult()
@@ -229,6 +245,8 @@ class ParsedMessageContent {
     val voiceData: MutableList<String> = mutableListOf()
     val avatarIntentPayloads: MutableList<String> = mutableListOf()
     val deviceRequestPayloads: MutableList<String> = mutableListOf()
+    val callAudioPayloads: MutableList<String> = mutableListOf()
+    val callStatePayloads: MutableList<String> = mutableListOf()
     fun addText(t: String): Unit {
         textData.add(t)
     }
@@ -246,6 +264,12 @@ class ParsedMessageContent {
     }
     fun addDeviceRequest(payload: String): Unit {
         deviceRequestPayloads.add(payload)
+    }
+    fun addCallAudio(payload: String): Unit {
+        callAudioPayloads.add(payload)
+    }
+    fun addCallState(payload: String): Unit {
+        callStatePayloads.add(payload)
     }
     fun addUnknown(type: String, data: String): Unit {
         chatLogger.warn(

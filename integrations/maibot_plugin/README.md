@@ -3,18 +3,23 @@
 这个目录是可直接复制进 MaiBot 1.x 的原生插件，不是独立 Adapter，也不包含
 Unity、Live2D 模型或其他角色资产。
 
-它向 MaiBot 暴露三个 LLM 工具：
+它向 MaiBot 暴露两个与设备有关的 LLM 工具：
 
 - `maimchat_avatar_intent`：发送与渲染器无关的情绪和动作意图。
 - `maimchat_camera_snapshot`：请求 Android 设备拍摄一张前置或后置摄像头照片。
-- `maimchat_speak`：视频通话中通过可配置 HTTP TTS 服务生成语音并发回设备扬声器。
 
 普通文字、语音和图片消息仍走 Maimchat 已有的 `maim_message` WebSocket 连接。
 拍照请求不会开启持续视频流；Android App 默认拒绝远程拍照，必须先由现场用户在
 “更多操作”中打开“允许 MaiBot 按需拍照”。
 
 Android 的视频通话模式会把一段自动分轮的语音和当前摄像头关键帧合并为一条
-多模态消息。消息会明确要求 MaiBot 简短口语回答并调用 `maimchat_speak`。
+多模态消息。MaiBot 正常生成文字回复后，Android 后台服务会自动发送一条被插件
+拦截的 `/maimchat call-tts` 内部命令；这条命令不会进入回复模型，也不会显示在
+聊天记录中。插件用 `request_id` 和 `turn_id` 返回 `call_audio`，Android 只播放
+当前轮次的音频。远端 TTS 超时、报错或音频无法播放时，设备会自动改用 Android
+系统 TTS，确保每轮有可听回复。`maimchat_speak` 不再作为全局 LLM 工具注册，
+因此不会误影响 QQ 通话或其他平台。
+
 TTS 接口默认是 `http://127.0.0.1:9881/v1/synthesize`，应接受 JSON
 `{"text":"...","language":"Chinese"}` 并直接返回 WAV；地址、音色和超时都可在
 插件配置的“设备能力”中修改。
@@ -23,7 +28,8 @@ TTS 接口默认是 `http://127.0.0.1:9881/v1/synthesize`，应接受 JSON
 
 - MaiBot `1.0.0` 到 `1.x`
 - `maibot-plugin-sdk >= 2.5.4`
-- 支持 `avatar_intent` 和 `device_request` 的 Maimchat Android 版本
+- 支持 `avatar_intent`、`device_request`、`call_audio` 和 `call_state` 的
+  Maimchat Android 版本
 
 本插件使用 MaiBot 大更新后的 `@Tool` / `ctx.send.custom` 接口，不能直接装进
 0.11.x 及更早版本。请先完成 MaiBot 本体的升级。
@@ -61,7 +67,7 @@ MaiBot 侧的拍照工具；Android 侧的拍照授权仍默认关闭。
 
 ## 发送协议
 
-插件向当前聊天流发送两个自定义消息段。形象意图示例：
+插件向当前聊天流发送四类自定义消息段。形象意图示例：
 
 ```json
 {
@@ -88,3 +94,23 @@ MaiBot 侧的拍照工具；Android 侧的拍照授权仍默认关闭。
 
 `send.custom` 的 `data` 实际以 JSON 字符串发送，以兼容当前
 `maim_message` 自定义消息段和 Android 端解析器。
+
+通话语音成功时发送：
+
+```json
+{
+  "type": "call_audio",
+  "data": {
+    "version": 1,
+    "request_id": "tts-...",
+    "turn_id": "turn-...",
+    "reply_message_id": "reply-...",
+    "text": "要说出的回复",
+    "mime_type": "audio/wav",
+    "audio": "UklGR..."
+  }
+}
+```
+
+TTS 失败时发送同一 `request_id` 的 `call_state`，`phase` 为 `error`，让 Android
+立即执行本地语音兜底。

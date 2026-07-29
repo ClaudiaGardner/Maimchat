@@ -42,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 Maimchat 设备控制")
-    config_version: str = Field(default="1.1.0", description="配置版本")
+    config_version: str = Field(default="1.2.0", description="配置版本")
 
 
 class FeatureConfig(PluginConfigBase):
@@ -174,6 +174,66 @@ def clean_speech_text(value: Any, *, limit: int = 240) -> str:
     text = re.sub(r"[`*_>#|~]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
+
+
+def decode_call_tts_request(encoded: Any) -> dict[str, str]:
+    """Decode and validate the internal Android call-TTS command payload."""
+
+    value = str(encoded or "").strip()
+    if not value or len(value) > 4096 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("无效的通话语音请求编码")
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(value + padding)
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("无法解析通话语音请求") from error
+    if not isinstance(payload, dict):
+        raise ValueError("通话语音请求不是对象")
+    if payload.get("version") != 1 or payload.get("client") != "maimchat_android":
+        raise ValueError("不支持的通话语音请求版本或客户端")
+
+    request_id = _clean_name(payload.get("request_id"), limit=160)
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,160}", request_id):
+        raise ValueError("通话语音请求缺少有效 request_id")
+    speech = clean_speech_text(payload.get("text"))
+    if not speech:
+        raise ValueError("通话语音请求文本为空")
+    return {
+        "request_id": request_id,
+        "turn_id": _clean_name(payload.get("turn_id"), limit=160),
+        "reply_message_id": _clean_name(payload.get("reply_message_id"), limit=160),
+        "text": speech,
+    }
+
+
+def build_call_audio_payload(request: dict[str, str], audio: bytes) -> dict[str, str | int]:
+    """Build the correlated audio response consumed by the Android service."""
+
+    return {
+        "version": 1,
+        "request_id": request["request_id"],
+        "turn_id": request["turn_id"],
+        "reply_message_id": request["reply_message_id"],
+        "text": request["text"],
+        "mime_type": "audio/wav",
+        "audio": base64.b64encode(audio).decode("ascii"),
+    }
+
+
+def build_call_error_payload(
+    request: dict[str, str],
+    message: str,
+) -> dict[str, str | int]:
+    """Build a correlated error response so Android can immediately use local TTS."""
+
+    return {
+        "version": 1,
+        "request_id": request["request_id"],
+        "turn_id": request["turn_id"],
+        "phase": "error",
+        "message": str(message)[:240],
+    }
 
 
 def _synthesize_voice(
@@ -379,66 +439,88 @@ class MaimchatDevicePlugin(MaiBotPlugin):
             "camera": payload["camera"],
         }
 
-    @Tool(
-        "maimchat_speak",
-        brief_description="把 Maimchat 视频通话回复转换为语音并在设备扬声器播放",
-        detailed_description=(
-            "仅在当前用户消息明确处于 Maimchat 视频通话模式时调用。"
-            "text 必须是准备回复给用户的一到两句自然口语；调用后仍需正常输出相同的文字回复。"
-            "工具会通过配置的 HTTP TTS 服务生成 WAV，并作为 voice 消息段发给当前 Android 设备。"
-        ),
-        parameters=[
-            ToolParameterInfo(
-                name="text",
-                param_type=ToolParamType.STRING,
-                description="要在设备扬声器中说出的简短回复",
-                required=True,
-            ),
-        ],
+    @Command(
+        "maimchat_call_tts",
+        description="Maimchat Android 内部通话语音请求",
+        pattern=r"^/maimchat\s+call-tts\s+(?P<payload>[A-Za-z0-9_-]+)\s*$",
     )
-    async def handle_speak(
-        self,
-        text: str = "",
-        stream_id: str = "",
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        del kwargs
-        if not self.config.plugin.enabled:
-            return {"success": False, "content": "Maimchat 设备插件已禁用"}
-        if not self.config.features.call_tts_enabled:
-            return {"success": False, "content": "Maimchat 通话语音输出已禁用"}
+    async def handle_call_tts(self, stream_id: str = "", **kwargs: Any):
+        groups = kwargs.get("matched_groups")
+        groups = groups if isinstance(groups, dict) else {}
+        try:
+            request = decode_call_tts_request(groups.get("payload"))
+        except ValueError as error:
+            self.ctx.logger.warning("拒绝无效的 Maimchat 通话语音请求: %s", error)
+            return False, "", 2
         if not stream_id:
-            return {"success": False, "content": "缺少当前聊天流，无法定位 Maimchat 设备"}
+            return False, "", 2
 
-        speech = clean_speech_text(text)
-        if not speech:
-            return {"success": False, "content": "没有可播放的语音文本"}
-        endpoint = self.config.features.call_tts_endpoint.strip()
-        if not endpoint:
-            return {"success": False, "content": "尚未配置 Maimchat 通话 TTS 接口"}
+        if not self.config.plugin.enabled:
+            error_message = "Maimchat 设备插件已禁用"
+        elif not self.config.features.call_tts_enabled:
+            error_message = "Maimchat 通话语音输出已禁用"
+        elif not self.config.features.call_tts_endpoint.strip():
+            error_message = "尚未配置 Maimchat 通话 TTS 接口"
+        else:
+            error_message = ""
+
+        self.ctx.logger.info(
+            "收到 Maimchat 通话语音请求 request=%s turn=%s",
+            request["request_id"],
+            request["turn_id"] or "-",
+        )
+        if error_message:
+            await self.ctx.send.custom(
+                "call_state",
+                json.dumps(
+                    build_call_error_payload(request, error_message),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                stream_id,
+            )
+            return True, "", 2
 
         try:
             audio = await asyncio.to_thread(
                 _synthesize_voice,
-                endpoint=endpoint,
-                text=speech,
+                endpoint=self.config.features.call_tts_endpoint.strip(),
+                text=request["text"],
                 voice=self.config.features.call_tts_voice.strip(),
                 timeout_seconds=self.config.features.call_tts_timeout_seconds,
             )
         except Exception as error:
-            self.ctx.logger.error("Maimchat 通话 TTS 生成失败: %s", error)
-            return {"success": False, "content": f"通话语音生成失败：{error}"}
+            self.ctx.logger.error(
+                "Maimchat 通话 TTS 生成失败 request=%s: %s",
+                request["request_id"],
+                error,
+            )
+            await self.ctx.send.custom(
+                "call_state",
+                json.dumps(
+                    build_call_error_payload(request, str(error)),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                stream_id,
+            )
+            return True, "", 2
 
         sent = await self.ctx.send.custom(
-            "voice",
-            base64.b64encode(audio).decode("ascii"),
+            "call_audio",
+            json.dumps(
+                build_call_audio_payload(request, audio),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             stream_id,
         )
-        return {
-            "success": bool(sent),
-            "content": "通话语音已发送" if sent else "通话语音发送失败",
-            "text": speech,
-        }
+        if not sent:
+            self.ctx.logger.error(
+                "Maimchat 通话音频发送失败 request=%s",
+                request["request_id"],
+            )
+        return bool(sent), "", 2
 
     @Command(
         "maimchat_avatar_test",

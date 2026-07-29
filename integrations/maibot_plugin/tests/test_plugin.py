@@ -37,7 +37,7 @@ def configured_plugin(
         {
             "plugin": {
                 "enabled": True,
-                "config_version": "1.1.0",
+                "config_version": "1.2.0",
             },
             "features": {
                 "camera_requests_enabled": camera_enabled,
@@ -53,6 +53,26 @@ def configured_plugin(
         )
     )
     return instance, sender
+
+
+def encode_call_request(
+    *,
+    request_id: str = "tts-12345678",
+    turn_id: str = "turn-12345678",
+    text: str = "你好呀",
+) -> str:
+    raw = json.dumps(
+        {
+            "version": 1,
+            "client": "maimchat_android",
+            "request_id": request_id,
+            "turn_id": turn_id,
+            "reply_message_id": "reply-12345678",
+            "text": text,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 class ProtocolBuilderTests(unittest.TestCase):
@@ -101,6 +121,27 @@ class ProtocolBuilderTests(unittest.TestCase):
             "你好 这里",
         )
 
+    def test_call_tts_request_is_correlated_and_validated(self) -> None:
+        request = plugin.decode_call_tts_request(encode_call_request())
+
+        self.assertEqual(request["request_id"], "tts-12345678")
+        self.assertEqual(request["turn_id"], "turn-12345678")
+        self.assertEqual(request["text"], "你好呀")
+
+    def test_call_tts_request_rejects_wrong_client(self) -> None:
+        raw = json.dumps(
+            {
+                "version": 1,
+                "client": "unknown",
+                "request_id": "tts-12345678",
+                "text": "你好",
+            }
+        ).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+        with self.assertRaises(ValueError):
+            plugin.decode_call_tts_request(encoded)
+
 
 class PluginToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_avatar_tool_sends_custom_segment_to_current_stream(self) -> None:
@@ -147,27 +188,43 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["success"])
         self.assertEqual(sender.calls, [])
 
-    async def test_speak_tool_sends_generated_wav_as_voice_segment(self) -> None:
+    async def test_internal_call_tts_command_returns_correlated_audio(self) -> None:
         instance, sender = configured_plugin()
 
-        with patch.object(plugin, "_synthesize_voice", return_value=b"RIFF-test-wav"):
-            result = await instance.handle_speak(
-                text="你好呀",
+        with patch.object(plugin, "_synthesize_voice", return_value=b"RIFF-call-wav"):
+            result = await instance.handle_call_tts(
                 stream_id="stream-call",
+                matched_groups={"payload": encode_call_request()},
             )
 
-        self.assertTrue(result["success"])
-        self.assertEqual(sender.calls[0][0], "voice")
-        self.assertEqual(sender.calls[0][2], "stream-call")
-        self.assertEqual(base64.b64decode(sender.calls[0][1]), b"RIFF-test-wav")
+        self.assertEqual(result, (True, "", 2))
+        custom_type, data, stream_id = sender.calls[0]
+        payload = json.loads(data)
+        self.assertEqual(custom_type, "call_audio")
+        self.assertEqual(stream_id, "stream-call")
+        self.assertEqual(payload["request_id"], "tts-12345678")
+        self.assertEqual(payload["turn_id"], "turn-12345678")
+        self.assertEqual(base64.b64decode(payload["audio"]), b"RIFF-call-wav")
 
-    async def test_speak_tool_respects_server_side_switch(self) -> None:
-        instance, sender = configured_plugin(call_tts_enabled=False)
+    async def test_internal_call_tts_failure_requests_android_fallback(self) -> None:
+        instance, sender = configured_plugin()
 
-        result = await instance.handle_speak(text="不会播放", stream_id="stream-call")
+        with patch.object(
+            plugin,
+            "_synthesize_voice",
+            side_effect=RuntimeError("tts unavailable"),
+        ):
+            result = await instance.handle_call_tts(
+                stream_id="stream-call",
+                matched_groups={"payload": encode_call_request()},
+            )
 
-        self.assertFalse(result["success"])
-        self.assertEqual(sender.calls, [])
+        self.assertEqual(result, (True, "", 2))
+        custom_type, data, _ = sender.calls[0]
+        payload = json.loads(data)
+        self.assertEqual(custom_type, "call_state")
+        self.assertEqual(payload["phase"], "error")
+        self.assertEqual(payload["request_id"], "tts-12345678")
 
 
 if __name__ == "__main__":

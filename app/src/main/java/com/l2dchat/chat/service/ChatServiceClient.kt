@@ -13,6 +13,7 @@ import android.os.Messenger
 import android.os.RemoteException
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
+import com.l2dchat.chat.CallRuntimePhase
 import com.l2dchat.chat.DeviceRequest
 import com.l2dchat.chat.DeviceRequestCodec
 import com.l2dchat.chat.MessageBase
@@ -67,6 +68,8 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                                         )
                         ChatServiceProtocol.MSG_EVENT_DEVICE_REQUEST ->
                                 handleDeviceRequest(msg.data)
+                        ChatServiceProtocol.MSG_EVENT_CALL_STATE ->
+                                handleCallRuntimeState(msg.data)
                         ChatServiceProtocol.MSG_EVENT_ERROR -> {
                             msg.data
                                     .getString(ChatServiceProtocol.EXTRA_ERROR_MESSAGE)
@@ -122,6 +125,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     private val _speakerEnabled =
             MutableStateFlow(prefs.getBoolean(KEY_SPEAKER_ENABLED, true))
     private val _isSpeaking = MutableStateFlow(false)
+    private val _callRuntimeState = MutableStateFlow(CallRuntimeSnapshot())
     private var motionCallback: ((String, Int, Boolean) -> Unit)? = null
     private var avatarIntentCallback: ((AvatarIntent) -> Unit)? = null
     private var deviceRequestCallback: ((DeviceRequest) -> Unit)? = null
@@ -138,6 +142,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     val activeModel: StateFlow<String?> = _activeModel.asStateFlow()
     val speakerEnabled: StateFlow<Boolean> = _speakerEnabled.asStateFlow()
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
+    val callRuntimeState: StateFlow<CallRuntimeSnapshot> = _callRuntimeState.asStateFlow()
 
     fun bindService() {
         if (isBound) return
@@ -173,6 +178,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         logger.warn("Service disconnected component=$name")
         _connectionState.value = ChatConnectionState.DISCONNECTED
         _isSpeaking.value = false
+        _callRuntimeState.value = CallRuntimeSnapshot()
     }
 
     fun ensureBound() {
@@ -274,6 +280,19 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED,
                 Bundle().apply {
                     putBoolean(ChatServiceProtocol.EXTRA_SPEAKER_ENABLED, enabled)
+                }
+        )
+    }
+
+    fun setCallMode(active: Boolean, videoEnabled: Boolean) {
+        sendCommand(
+                ChatServiceProtocol.MSG_SET_CALL_MODE,
+                Bundle().apply {
+                    putBoolean(ChatServiceProtocol.EXTRA_CALL_ACTIVE, active)
+                    putBoolean(
+                            ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED,
+                            active && videoEnabled
+                    )
                 }
         )
     }
@@ -421,6 +440,37 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         DeviceRequestCodec.parse(payload)?.let { deviceRequestCallback?.invoke(it) }
     }
 
+    private fun handleCallRuntimeState(data: Bundle) {
+        _callRuntimeState.value =
+                CallRuntimeSnapshot(
+                        active =
+                                data.getBoolean(
+                                        ChatServiceProtocol.EXTRA_CALL_ACTIVE,
+                                        false
+                                ),
+                        videoEnabled =
+                                data.getBoolean(
+                                        ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED,
+                                        false
+                                ),
+                        phase =
+                                CallRuntimePhase.fromWireName(
+                                        data.getString(ChatServiceProtocol.EXTRA_CALL_PHASE)
+                                ),
+                        turnId =
+                                data.getString(ChatServiceProtocol.EXTRA_CALL_TURN_ID)
+                                        ?.ifBlank { null },
+                        ttsRequestId =
+                                data.getString(
+                                                ChatServiceProtocol.EXTRA_CALL_TTS_REQUEST_ID
+                                        )
+                                        ?.ifBlank { null },
+                        detail =
+                                data.getString(ChatServiceProtocol.EXTRA_CALL_STATE_DETAIL)
+                                        ?.ifBlank { null }
+                )
+    }
+
     private fun handleSnapshot(data: Bundle) {
         val messageBundles =
                 data.getParcelableArrayList<Bundle>(ChatServiceProtocol.EXTRA_MESSAGE_BUNDLE_LIST)
@@ -505,6 +555,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_CLEAR_MESSAGES_EPHEMERAL -> "MSG_CLEAR_MESSAGES_EPHEMERAL"
                 ChatServiceProtocol.MSG_SEND_MEDIA -> "MSG_SEND_MEDIA"
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED -> "MSG_SET_SPEAKER_ENABLED"
+                ChatServiceProtocol.MSG_SET_CALL_MODE -> "MSG_SET_CALL_MODE"
                 ChatServiceProtocol.MSG_EVENT_CONNECTION_STATE -> "MSG_EVENT_CONNECTION_STATE"
                 ChatServiceProtocol.MSG_EVENT_NEW_MESSAGE -> "MSG_EVENT_NEW_MESSAGE"
                 ChatServiceProtocol.MSG_EVENT_SNAPSHOT -> "MSG_EVENT_SNAPSHOT"
@@ -514,6 +565,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_EVENT_AVATAR_INTENT -> "MSG_EVENT_AVATAR_INTENT"
                 ChatServiceProtocol.MSG_EVENT_SPEAKING_STATE -> "MSG_EVENT_SPEAKING_STATE"
                 ChatServiceProtocol.MSG_EVENT_DEVICE_REQUEST -> "MSG_EVENT_DEVICE_REQUEST"
+                ChatServiceProtocol.MSG_EVENT_CALL_STATE -> "MSG_EVENT_CALL_STATE"
                 ChatServiceProtocol.MSG_SET_ACTIVE_MODEL -> "MSG_SET_ACTIVE_MODEL"
                 else -> "MSG_UNKNOWN_$what"
             }
@@ -523,6 +575,15 @@ class ChatServiceClient(context: Context) : ServiceConnection {
             val content: String,
             val isFromUser: Boolean,
             val timestamp: Long
+    )
+
+    data class CallRuntimeSnapshot(
+            val active: Boolean = false,
+            val videoEnabled: Boolean = false,
+            val phase: CallRuntimePhase = CallRuntimePhase.IDLE,
+            val turnId: String? = null,
+            val ttsRequestId: String? = null,
+            val detail: String? = null
     )
 
     enum class ChatConnectionState {

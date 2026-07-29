@@ -34,10 +34,22 @@ data class Seg(@SerializedName("type") val type: String, @SerializedName("data")
         fun fromJson(json: JsonObject): Seg {
             val type = json.get("type").asString
             val dataElement = json.get("data")
+            if (type in setOf("dict", "segment") &&
+                            dataElement?.isJsonObject == true &&
+                            dataElement.asJsonObject.has("type") &&
+                            dataElement.asJsonObject.has("data")
+            ) {
+                return fromJson(dataElement.asJsonObject)
+            }
             val data: Any =
                     when (type) {
                         "seglist" -> dataElement.asJsonArray.map { fromJson(it.asJsonObject) }
-                        else -> dataElement.asString
+                        else ->
+                                when {
+                                    dataElement == null || dataElement.isJsonNull -> ""
+                                    dataElement.isJsonPrimitive -> dataElement.asString
+                                    else -> dataElement.toString()
+                                }
                     }
             return Seg(type, data)
         }
@@ -345,7 +357,8 @@ private fun Seg.redactedForHistory(): Seg =
                 val children = data as List<Seg>
                 copy(data = children.map { it.redactedForHistory() })
             }
-            "image", "emoji", "voice", "video", "file" -> copy(data = MEDIA_PAYLOAD_REDACTED)
+            "image", "emoji", "voice", "video", "file", "call_audio" ->
+                    copy(data = MEDIA_PAYLOAD_REDACTED)
             else ->
                     if (data.toString().length > MAX_HISTORY_SEGMENT_CHARS) {
                         copy(data = data.toString().take(MAX_HISTORY_SEGMENT_CHARS))
