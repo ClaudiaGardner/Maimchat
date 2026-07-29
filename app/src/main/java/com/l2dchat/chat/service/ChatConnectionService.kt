@@ -13,6 +13,7 @@ import android.os.RemoteException
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.CallAudioPayload
+import com.l2dchat.chat.CallBackendMode
 import com.l2dchat.chat.CallRuntimePhase
 import com.l2dchat.chat.CallStatePayload
 import com.l2dchat.chat.CallTtsRequest
@@ -22,11 +23,14 @@ import com.l2dchat.chat.ChatWebSocketManager.ConnectionState
 import com.l2dchat.chat.DeviceRequest
 import com.l2dchat.chat.DeviceRequestCodec
 import com.l2dchat.chat.MessageBase
+import com.l2dchat.chat.RealtimeSessionPayload
+import com.l2dchat.chat.RealtimeSessionRequest
 import com.l2dchat.logging.L2DLogger
 import com.l2dchat.logging.LogModule
 import com.l2dchat.media.DeviceAudioPlayer
 import com.l2dchat.media.DeviceMediaPayloadEncoder
 import com.l2dchat.media.DeviceTextToSpeechPlayer
+import com.l2dchat.media.RealtimeConversationClient
 import com.l2dchat.wallpaper.WallpaperComm
 import java.io.File
 import java.lang.ref.WeakReference
@@ -54,10 +58,13 @@ class ChatConnectionService : Service() {
     private lateinit var manager: ChatWebSocketManager
     private lateinit var audioPlayer: DeviceAudioPlayer
     private lateinit var systemTtsPlayer: DeviceTextToSpeechPlayer
+    private lateinit var realtimeClient: RealtimeConversationClient
     private var speakerEnabled: Boolean = true
     private var isSpeaking: Boolean = false
     private var callModeActive: Boolean = false
     private var callVideoEnabled: Boolean = false
+    private var callMicrophoneEnabled: Boolean = true
+    private var callBackendMode: CallBackendMode = CallBackendMode.CASCADE
     private var callPhase: CallRuntimePhase = CallRuntimePhase.IDLE
     private var callStateDetail: String? = null
     private var pendingTurnId: String? = null
@@ -72,6 +79,9 @@ class ChatConnectionService : Service() {
     private var botTextSettleJob: Job? = null
     private var pendingBotSpeech: String = ""
     private var pendingBotReplyMessageId: String? = null
+    private var pendingRealtimeSessionRequestId: String? = null
+    private var realtimeSessionTimeoutJob: Job? = null
+    private var realtimeSessionActive: Boolean = false
 
     private var lastKnownUrl: String? = null
     private var lastKnownPlatform: String? = null
@@ -99,13 +109,59 @@ class ChatConnectionService : Service() {
                             serviceScope.launch { handlePlaybackStateChanged(speaking) }
                         }
                 )
+        realtimeClient =
+                RealtimeConversationClient(
+                        context = applicationContext,
+                        onPhaseChanged = { phase, detail ->
+                            serviceScope.launch {
+                                if (callModeActive &&
+                                                callBackendMode == CallBackendMode.REALTIME
+                                ) {
+                                    updateCallState(phase, detail)
+                                }
+                            }
+                        },
+                        onSpeakingChanged = { speaking ->
+                            serviceScope.launch {
+                                if (callBackendMode == CallBackendMode.REALTIME) {
+                                    isSpeaking = speaking
+                                    broadcastSpeakingState()
+                                }
+                            }
+                        },
+                        onUserTranscript = { transcript ->
+                            serviceScope.launch {
+                                if (callBackendMode == CallBackendMode.REALTIME) {
+                                    manager.addRealtimeTranscript(
+                                            transcript,
+                                            isFromUser = true
+                                    )
+                                }
+                            }
+                        },
+                        onAssistantTranscript = { transcript ->
+                            serviceScope.launch {
+                                if (callBackendMode == CallBackendMode.REALTIME) {
+                                    manager.addRealtimeTranscript(
+                                            transcript,
+                                            isFromUser = false
+                                    )
+                                }
+                            }
+                        },
+                        onError = { error ->
+                            serviceScope.launch { fallbackFromRealtime(error) }
+                        }
+                )
         speakerEnabled =
                 getSharedPreferences(CHAT_PREFS, MODE_PRIVATE)
                         .getBoolean(KEY_SPEAKER_ENABLED, true)
+        realtimeClient.setOutputEnabled(speakerEnabled)
         manager.setVoiceReceivedCallback(::handleVoicePayload)
         manager.setBotTextReceivedCallback(::handleBotTextReceived)
         manager.setCallAudioReceivedCallback(::handleCallAudioReceived)
         manager.setCallStateReceivedCallback(::handleCallStateReceived)
+        manager.setRealtimeSessionReceivedCallback(::handleRealtimeSessionReceived)
         manager.setMotionTriggerCallback { group, index, loop ->
             broadcastMotion(group, index, loop)
         }
@@ -132,8 +188,10 @@ class ChatConnectionService : Service() {
         turnTimeoutJob?.cancel()
         ttsTimeoutJob?.cancel()
         botTextSettleJob?.cancel()
+        realtimeSessionTimeoutJob?.cancel()
         audioPlayer.stop()
         systemTtsPlayer.shutdown()
+        realtimeClient.release()
         manager.disconnect()
     }
 
@@ -188,6 +246,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handleVoicePayload(payload: String) {
+        if (callModeActive && callBackendMode == CallBackendMode.REALTIME) return
         lastVoiceReceivedAt = System.currentTimeMillis()
         if (callModeActive) {
             turnTimeoutJob?.cancel()
@@ -207,6 +266,7 @@ class ChatConnectionService : Service() {
 
     private fun handleBotTextReceived(message: ChatMessage, includesVoice: Boolean) {
         if (!callModeActive) return
+        if (callBackendMode == CallBackendMode.REALTIME) return
         turnTimeoutJob?.cancel()
         val speech = cleanReplyText(message.content)
         if (speech.isBlank()) {
@@ -290,6 +350,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handleCallAudioReceived(payload: CallAudioPayload) {
+        if (callBackendMode == CallBackendMode.REALTIME) return
         if (!callModeActive || payload.requestId != pendingTtsRequestId) {
             logger.debug(
                     "忽略过期通话音频 request=${payload.requestId} pending=$pendingTtsRequestId",
@@ -306,6 +367,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handleCallStateReceived(payload: CallStatePayload) {
+        if (callBackendMode == CallBackendMode.REALTIME) return
         if (!callModeActive ||
                         payload.phase != CallRuntimePhase.ERROR ||
                         payload.requestId != pendingTtsRequestId
@@ -342,6 +404,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handleRemotePlaybackError(error: String) {
+        if (callBackendMode == CallBackendMode.REALTIME) return
         val canFallback = !currentSpeechText.isNullOrBlank() && callModeActive
         if (canFallback) preparingRemoteAudio = true
         serviceScope.launch {
@@ -393,6 +456,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handleSystemTtsError(error: String) {
+        if (callBackendMode == CallBackendMode.REALTIME) return
         if (currentSpeechText.isNullOrBlank()) {
             logger.warn(error)
             return
@@ -409,6 +473,7 @@ class ChatConnectionService : Service() {
     }
 
     private fun handlePlaybackStateChanged(speaking: Boolean) {
+        if (callBackendMode == CallBackendMode.REALTIME) return
         isSpeaking = speaking
         broadcastSpeakingState()
         if (!callModeActive) return
@@ -557,6 +622,10 @@ class ChatConnectionService : Service() {
                 Bundle().apply {
                     putBoolean(ChatServiceProtocol.EXTRA_CALL_ACTIVE, callModeActive)
                     putBoolean(ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED, callVideoEnabled)
+                    putString(
+                            ChatServiceProtocol.EXTRA_CALL_BACKEND_MODE,
+                            callBackendMode.name
+                    )
                     putString(ChatServiceProtocol.EXTRA_CALL_PHASE, callPhase.name)
                     putString(ChatServiceProtocol.EXTRA_CALL_TURN_ID, pendingTurnId)
                     putString(ChatServiceProtocol.EXTRA_CALL_TTS_REQUEST_ID, pendingTtsRequestId)
@@ -764,20 +833,44 @@ class ChatConnectionService : Service() {
                 .edit()
                 .putBoolean(KEY_SPEAKER_ENABLED, speakerEnabled)
                 .apply()
+        realtimeClient.setOutputEnabled(speakerEnabled)
         if (!speakerEnabled) {
             audioPlayer.stop()
             systemTtsPlayer.stop()
-            finishCallTurn()
+            if (callBackendMode == CallBackendMode.CASCADE) finishCallTurn()
         }
     }
 
     private fun handleCallMode(data: Bundle) {
         val active = data.getBoolean(ChatServiceProtocol.EXTRA_CALL_ACTIVE, false)
         val video = data.getBoolean(ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED, false)
+        val microphoneEnabled =
+                data.getBoolean(
+                        ChatServiceProtocol.EXTRA_CALL_MICROPHONE_ENABLED,
+                        true
+                )
+        val requestedBackend =
+                CallBackendMode.fromWireName(
+                        data.getString(ChatServiceProtocol.EXTRA_CALL_BACKEND_MODE)
+                )
+        val backendChanged = callBackendMode != requestedBackend
+        callBackendMode = requestedBackend
+        if (backendChanged) {
+            stopRealtimeSession()
+            stopCascadePlayback()
+        }
         callModeActive = active
         callVideoEnabled = active && video
+        callMicrophoneEnabled = active && microphoneEnabled
+        realtimeClient.setInputEnabled(callMicrophoneEnabled)
         if (active) {
-            if (isSpeaking) {
+            if (callBackendMode == CallBackendMode.REALTIME) {
+                if (!realtimeSessionActive &&
+                                pendingRealtimeSessionRequestId == null
+                ) {
+                    requestRealtimeSession()
+                }
+            } else if (isSpeaking) {
                 updateCallState(CallRuntimePhase.SPEAKING, "正在回应")
             } else if (pendingTtsRequestId != null) {
                 updateCallState(CallRuntimePhase.SYNTHESIZING, "正在生成回复语音")
@@ -787,6 +880,7 @@ class ChatConnectionService : Service() {
                 updateCallState(CallRuntimePhase.LISTENING, "正在聆听")
             }
         } else {
+            stopRealtimeSession()
             turnTimeoutJob?.cancel()
             ttsTimeoutJob?.cancel()
             botTextSettleJob?.cancel()
@@ -798,6 +892,122 @@ class ChatConnectionService : Service() {
             updateCallState(CallRuntimePhase.IDLE, null)
         }
         broadcastCallState()
+    }
+
+    private fun requestRealtimeSession() {
+        if (!callModeActive || callBackendMode != CallBackendMode.REALTIME) return
+        if (manager.connectionState.value != ConnectionState.CONNECTED) {
+            ensureConnected()
+            fallbackFromRealtime("MaiBot 尚未连接，无法获取端到端会话授权")
+            return
+        }
+        val requestId = "realtime-${UUID.randomUUID()}"
+        pendingRealtimeSessionRequestId = requestId
+        updateCallState(CallRuntimePhase.THINKING, "正在获取端到端会话")
+        manager.requestRealtimeSession(
+                RealtimeSessionRequest(
+                        requestId = requestId,
+                        nickname = lastKnownNickname,
+                        videoEnabled = callVideoEnabled
+                )
+        )
+        realtimeSessionTimeoutJob?.cancel()
+        realtimeSessionTimeoutJob =
+                serviceScope.launch {
+                    delay(REALTIME_SESSION_TIMEOUT_MS)
+                    if (pendingRealtimeSessionRequestId == requestId) {
+                        fallbackFromRealtime("端到端会话授权等待超时")
+                    }
+                }
+    }
+
+    private fun handleRealtimeSessionReceived(payload: RealtimeSessionPayload) {
+        if (!callModeActive ||
+                        callBackendMode != CallBackendMode.REALTIME ||
+                        payload.requestId != pendingRealtimeSessionRequestId
+        ) {
+            return
+        }
+        realtimeSessionTimeoutJob?.cancel()
+        pendingRealtimeSessionRequestId = null
+        if (!payload.isSuccess) {
+            fallbackFromRealtime(payload.error ?: "端到端会话授权失败")
+            return
+        }
+        realtimeClient.setOutputEnabled(speakerEnabled)
+        realtimeClient.start(payload)
+                .onSuccess { realtimeSessionActive = true }
+                .onFailure { error ->
+                    fallbackFromRealtime(error.message ?: "端到端实时连接启动失败")
+                }
+    }
+
+    private fun fallbackFromRealtime(reason: String) {
+        if (!callModeActive || callBackendMode != CallBackendMode.REALTIME) return
+        logger.warn("$reason，回退到串联模式")
+        stopRealtimeSession()
+        callBackendMode = CallBackendMode.CASCADE
+        isSpeaking = false
+        broadcastSpeakingState()
+        notifyError("$reason，已回退到串联模式")
+        updateCallState(CallRuntimePhase.LISTENING, "串联模式 · 正在聆听")
+        broadcastCallState()
+    }
+
+    private fun stopRealtimeSession() {
+        realtimeSessionTimeoutJob?.cancel()
+        realtimeSessionTimeoutJob = null
+        pendingRealtimeSessionRequestId = null
+        realtimeSessionActive = false
+        realtimeClient.stop()
+    }
+
+    private fun stopCascadePlayback() {
+        turnTimeoutJob?.cancel()
+        ttsTimeoutJob?.cancel()
+        botTextSettleJob?.cancel()
+        audioPlayer.stop()
+        systemTtsPlayer.stop()
+        pendingTurnId = null
+        pendingTtsRequestId = null
+        pendingReplyText = null
+        pendingBotSpeech = ""
+        pendingBotReplyMessageId = null
+        currentSpeechText = null
+        currentSpeechRequestId = null
+        preparingRemoteAudio = false
+        isSpeaking = false
+        broadcastSpeakingState()
+    }
+
+    private fun handleRealtimeFrame(data: Bundle) {
+        val path = data.getString(ChatServiceProtocol.EXTRA_REALTIME_FRAME_FILE_PATH)
+        if (path.isNullOrBlank()) return
+        val file = File(path)
+        if (!callModeActive ||
+                        callBackendMode != CallBackendMode.REALTIME ||
+                        !callVideoEnabled ||
+                        !realtimeSessionActive
+        ) {
+            file.delete()
+            return
+        }
+        serviceScope.launch {
+            try {
+                val jpeg =
+                        withContext(Dispatchers.IO) {
+                            DeviceMediaPayloadEncoder.encodeRealtimeImage(
+                                    applicationContext,
+                                    path
+                            )
+                        }
+                realtimeClient.appendImage(jpeg)
+            } catch (error: Throwable) {
+                logger.warn("实时视频关键帧发送失败: ${error.message ?: "未知错误"}")
+            } finally {
+                withContext(Dispatchers.IO) { file.delete() }
+            }
+        }
     }
 
     private fun newCallTurnId(): String = "turn-${UUID.randomUUID()}"
@@ -944,6 +1154,8 @@ class ChatConnectionService : Service() {
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED ->
                         service.handleSpeakerEnabled(msg.data)
                 ChatServiceProtocol.MSG_SET_CALL_MODE -> service.handleCallMode(msg.data)
+                ChatServiceProtocol.MSG_SEND_REALTIME_FRAME ->
+                        service.handleRealtimeFrame(msg.data)
                 else -> super.handleMessage(msg)
             }
         }
@@ -964,6 +1176,7 @@ class ChatConnectionService : Service() {
         private const val BOT_REPLY_TIMEOUT_MS = 90_000L
         private const val BOT_TEXT_SETTLE_MS = 2_800L
         private const val ERROR_STATE_HOLD_MS = 1_500L
+        private const val REALTIME_SESSION_TIMEOUT_MS = 15_000L
         private const val SYSTEM_TTS_READY_RETRIES = 20
         private const val SYSTEM_TTS_RETRY_DELAY_MS = 100L
     }

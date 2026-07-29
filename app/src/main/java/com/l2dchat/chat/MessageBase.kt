@@ -357,7 +357,7 @@ private fun Seg.redactedForHistory(): Seg =
                 val children = data as List<Seg>
                 copy(data = children.map { it.redactedForHistory() })
             }
-            "image", "emoji", "voice", "video", "file", "call_audio" ->
+            "image", "emoji", "voice", "video", "file", "call_audio", "realtime_session" ->
                     copy(data = MEDIA_PAYLOAD_REDACTED)
             else ->
                     if (data.toString().length > MAX_HISTORY_SEGMENT_CHARS) {

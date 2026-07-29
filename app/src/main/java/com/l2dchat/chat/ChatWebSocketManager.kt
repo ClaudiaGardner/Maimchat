@@ -66,6 +66,7 @@ class ChatWebSocketManager {
     private var onBotTextReceived: ((ChatMessage, Boolean) -> Unit)? = null
     private var onCallAudioReceived: ((CallAudioPayload) -> Unit)? = null
     private var onCallStateReceived: ((CallStatePayload) -> Unit)? = null
+    private var onRealtimeSessionReceived: ((RealtimeSessionPayload) -> Unit)? = null
     private var userId: String = generateUserId()
     private var userNickname: String? = null
     private var userCardName: String? = null
@@ -369,7 +370,8 @@ class ChatWebSocketManager {
                                                         "avatar_intent",
                                                         "device_request",
                                                         "call_audio",
-                                                        "call_state"
+                                                        "call_state",
+                                                        "realtime_session"
                                                 )
                                 ),
                         templateInfo = null,
@@ -480,6 +482,11 @@ class ChatWebSocketManager {
                 is Live2DChatMessageHandler.ChatMessageResult.CallStateProcessed -> {
                     if (!isHistorical && !isSenderMe(standard.messageInfo.senderInfo)) {
                         onCallStateReceived?.invoke(result.payload)
+                    }
+                }
+                is Live2DChatMessageHandler.ChatMessageResult.RealtimeSessionProcessed -> {
+                    if (!isHistorical && !isSenderMe(standard.messageInfo.senderInfo)) {
+                        onRealtimeSessionReceived?.invoke(result.payload)
                     }
                 }
                 is Live2DChatMessageHandler.ChatMessageResult.EmojiProcessed -> {}
@@ -609,6 +616,24 @@ class ChatWebSocketManager {
         sendStandardMessage(message)
     }
 
+    fun requestRealtimeSession(request: RealtimeSessionRequest) {
+        val command = CallInteractionCodec.encodeRealtimeSessionCommand(request)
+        val message =
+                buildStandardMessage(
+                        segments = listOf(Seg("text", command)),
+                        messageType = "control",
+                        raw = null,
+                        additional =
+                                mapOf(
+                                        "control_only" to true,
+                                        "control_type" to "realtime_session",
+                                        "call_mode" to true,
+                                        "request_id" to request.requestId
+                                )
+                )
+        sendStandardMessage(message)
+    }
+
     private fun sendMediaMessage(
             type: String,
             payload: String,
@@ -696,7 +721,21 @@ class ChatWebSocketManager {
     fun setCallStateReceivedCallback(callback: (CallStatePayload) -> Unit) {
         onCallStateReceived = callback
     }
+    fun setRealtimeSessionReceivedCallback(callback: (RealtimeSessionPayload) -> Unit) {
+        onRealtimeSessionReceived = callback
+    }
     fun getMessageEvents() = messageHandler.messageEvents
+    fun addRealtimeTranscript(content: String, isFromUser: Boolean) {
+        val normalized = content.trim()
+        if (normalized.isEmpty()) return
+        addMessage(
+                ChatMessage(
+                        id = "realtime_${generateMessageId()}",
+                        content = normalized,
+                        isFromUser = isFromUser
+                )
+        )
+    }
     private fun addMessage(message: ChatMessage) {
         val list = _messages.value.toMutableList()
         if (list.any { it.id == message.id }) return

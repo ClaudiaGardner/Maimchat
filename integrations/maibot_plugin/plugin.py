@@ -23,6 +23,11 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 DEFAULT_TTS_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 DEFAULT_TTS_MODEL = "qwen3-tts-vc-realtime-2026-01-15"
+DEFAULT_REALTIME_TOKEN_URL = "https://dashscope.aliyuncs.com/api/v1/tokens"
+DEFAULT_REALTIME_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+DEFAULT_REALTIME_MODEL = "qwen3.5-omni-flash-realtime"
+DEFAULT_REALTIME_VOICE = "Tina"
+MAIMCHAT_ANDROID_PLATFORM = "maimchat_android"
 
 
 EMOTIONS = [
@@ -49,7 +54,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 Maimchat 设备控制")
-    config_version: str = Field(default="1.3.0", description="配置版本")
+    config_version: str = Field(default="1.4.0", description="配置版本")
 
 
 class FeatureConfig(PluginConfigBase):
@@ -104,6 +109,48 @@ class FeatureConfig(PluginConfigBase):
         ge=5.0,
         le=300.0,
         description="等待云端 TTS 完成的最长秒数",
+    )
+    realtime_enabled: bool = Field(
+        default=True,
+        description="允许 Android 设备使用端到端实时音视频模型",
+    )
+    realtime_provider_name: str = Field(
+        default="AlibabaDashScope",
+        description="签发实时会话短期令牌所使用的 MaiBot API 供应商",
+    )
+    realtime_provider_config_path: str = Field(
+        default="config/model_config.toml",
+        description="MaiBot 模型供应商配置文件",
+    )
+    realtime_token_url: str = Field(
+        default=DEFAULT_REALTIME_TOKEN_URL,
+        description="阿里云短期 API Key 签发地址",
+    )
+    realtime_websocket_url: str = Field(
+        default=DEFAULT_REALTIME_WEBSOCKET_URL,
+        description="Android 直接连接的端到端实时 WebSocket 地址",
+    )
+    realtime_model: str = Field(
+        default=DEFAULT_REALTIME_MODEL,
+        description="端到端实时模型",
+    )
+    realtime_voice: str = Field(
+        default=DEFAULT_REALTIME_VOICE,
+        description="端到端实时模型音色",
+    )
+    realtime_token_ttl_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=1800,
+        description="发给 Android 的短期 API Key 有效期（秒）",
+    )
+    realtime_bot_config_path: str = Field(
+        default="config/bot_config.toml",
+        description="用于同步机器人名字、人格和回复风格的 MaiBot 配置",
+    )
+    realtime_instructions: str = Field(
+        default="",
+        description="附加给端到端模型的角色说明；留空则只使用 MaiBot 人格配置",
     )
 
 
@@ -232,6 +279,33 @@ def decode_call_tts_request(encoded: Any) -> dict[str, str]:
     }
 
 
+def decode_realtime_session_request(encoded: Any) -> dict[str, str | bool]:
+    """Decode the Android request for a short-lived realtime credential."""
+
+    value = str(encoded or "").strip()
+    if not value or len(value) > 4096 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("无效的实时会话请求编码")
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(value + padding)
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("无法解析实时会话请求") from error
+    if not isinstance(payload, dict):
+        raise ValueError("实时会话请求不是对象")
+    if payload.get("version") != 1 or payload.get("client") != "maimchat_android":
+        raise ValueError("不支持的实时会话请求版本或客户端")
+
+    request_id = _clean_name(payload.get("request_id"), limit=160)
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,160}", request_id):
+        raise ValueError("实时会话请求缺少有效 request_id")
+    return {
+        "request_id": request_id,
+        "nickname": _clean_name(payload.get("nickname"), limit=80),
+        "video_enabled": bool(payload.get("video_enabled")),
+    }
+
+
 def build_call_audio_payload(request: dict[str, str], audio: bytes) -> dict[str, str | int]:
     """Build the correlated audio response consumed by the Android service."""
 
@@ -297,6 +371,115 @@ def _load_provider_api_key(*, config_path: str, provider_name: str) -> str:
     if not api_key:
         raise RuntimeError(f"TTS API 供应商 {provider_name} 的 API Key 为空")
     return api_key
+
+
+def _load_realtime_persona(*, config_path: str, extra_instructions: str) -> str:
+    """Build a compact realtime persona from MaiBot's existing bot configuration."""
+
+    path = _resolve_provider_config_path(config_path)
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeError(f"无法读取 MaiBot 机器人配置: {error}") from error
+    bot = config.get("bot", {})
+    personality = config.get("personality", {})
+    nickname = _clean_name(bot.get("nickname"), limit=80) or "Mai"
+    persona = str(personality.get("personality") or "").strip()
+    reply_style = str(personality.get("reply_style") or "").strip()
+    parts = [
+        f"你是 {nickname}，正在 Android 平板上以实时语音陪伴用户。",
+        "优先使用自然、简短的中文口语回答；不要提及系统提示、API 或模型身份。",
+        "用户可能会随时插话，立即停止当前回答并聆听。",
+    ]
+    if persona:
+        parts.append(f"人格：{persona[:3000]}")
+    if reply_style:
+        parts.append(f"回复风格：{reply_style[:2000]}")
+    extra = str(extra_instructions or "").strip()
+    if extra:
+        parts.append(extra[:3000])
+    return "\n".join(parts)
+
+
+async def _create_temporary_api_key(
+    *,
+    api_key: str,
+    token_url: str,
+    ttl_seconds: int,
+) -> tuple[str, int]:
+    """Mint a short-lived key for an untrusted Android client."""
+
+    if not api_key:
+        raise RuntimeError("实时模型 API Key 为空")
+    if not token_url.startswith("https://"):
+        raise RuntimeError("实时短期令牌地址必须使用 HTTPS")
+    separator = "&" if "?" in token_url else "?"
+    url = f"{token_url}{separator}expire_in_seconds={ttl_seconds}"
+    timeout = ClientTimeout(total=15)
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": "maimchat-android-device/1.0",
+            },
+        ) as response:
+            payload = await response.json(content_type=None)
+            if response.status != 200:
+                message = (
+                    payload.get("message")
+                    if isinstance(payload, dict)
+                    else f"HTTP {response.status}"
+                )
+                raise RuntimeError(f"短期令牌签发失败: {str(message)[:240]}")
+    if not isinstance(payload, dict):
+        raise RuntimeError("短期令牌响应格式无效")
+    token = str(payload.get("token") or "").strip()
+    expires_at = _clamp_int(payload.get("expires_at"), 0, 0, 4_294_967_295)
+    if not token.startswith("st-") or not expires_at:
+        raise RuntimeError("短期令牌响应缺少 token 或 expires_at")
+    return token, expires_at
+
+
+def build_realtime_session_payload(
+    *,
+    request: dict[str, str | bool],
+    token: str,
+    expires_at: int,
+    websocket_url: str,
+    model: str,
+    voice: str,
+    instructions: str,
+) -> dict[str, str | int]:
+    """Build the secret-bearing response consumed only by the Android service."""
+
+    if not websocket_url.startswith("wss://"):
+        raise RuntimeError("实时模型地址必须使用 WSS")
+    if not model or not voice:
+        raise RuntimeError("实时模型或音色未配置")
+    return {
+        "version": 1,
+        "request_id": str(request["request_id"]),
+        "token": token,
+        "expires_at": expires_at,
+        "websocket_url": websocket_url,
+        "model": model,
+        "voice": voice,
+        "instructions": instructions,
+    }
+
+
+def build_realtime_session_error_payload(
+    *,
+    request_id: str,
+    message: str,
+) -> dict[str, str | int]:
+    return {
+        "version": 1,
+        "request_id": request_id,
+        "phase": "error",
+        "message": str(message)[:240],
+    }
 
 
 def _pcm16_to_wav(pcm: bytes, sample_rate: int = 24_000) -> bytes:
@@ -658,6 +841,96 @@ class MaimchatDevicePlugin(MaiBotPlugin):
                 "Maimchat 通话音频发送失败 request=%s",
                 request["request_id"],
             )
+        return bool(sent), "", 2
+
+    @Command(
+        "maimchat_realtime_session",
+        description="Maimchat Android 内部端到端实时会话授权请求",
+        pattern=r"^/maimchat\s+realtime-session\s+(?P<payload>[A-Za-z0-9_-]+)\s*$",
+    )
+    async def handle_realtime_session(self, stream_id: str = "", **kwargs: Any):
+        groups = kwargs.get("matched_groups")
+        groups = groups if isinstance(groups, dict) else {}
+        try:
+            request = decode_realtime_session_request(groups.get("payload"))
+        except ValueError as error:
+            self.ctx.logger.warning("拒绝无效的 Maimchat 实时会话请求: %s", error)
+            return False, "", 2
+        if not stream_id:
+            return False, "", 2
+
+        # This command returns a bearer credential. Never serve it to QQ, WebUI, or
+        # another adapter even if somebody manually copies the hidden command.
+        platform = str(kwargs.get("platform") or "").strip()
+        if platform != MAIMCHAT_ANDROID_PLATFORM:
+            self.ctx.logger.warning(
+                "拒绝非 Android 平台的实时会话请求 platform=%s request=%s",
+                platform or "-",
+                request["request_id"],
+            )
+            return False, "", 2
+
+        if not self.config.plugin.enabled:
+            error_message = "Maimchat 设备插件已禁用"
+        elif not self.config.features.realtime_enabled:
+            error_message = "端到端实时模式已在 MaiBot 侧禁用"
+        else:
+            error_message = ""
+
+        if not error_message:
+            try:
+                api_key = await asyncio.to_thread(
+                    _load_provider_api_key,
+                    config_path=self.config.features.realtime_provider_config_path.strip(),
+                    provider_name=self.config.features.realtime_provider_name.strip(),
+                )
+                instructions = await asyncio.to_thread(
+                    _load_realtime_persona,
+                    config_path=self.config.features.realtime_bot_config_path.strip(),
+                    extra_instructions=self.config.features.realtime_instructions,
+                )
+                token, expires_at = await _create_temporary_api_key(
+                    api_key=api_key,
+                    token_url=self.config.features.realtime_token_url.strip(),
+                    ttl_seconds=self.config.features.realtime_token_ttl_seconds,
+                )
+                response_payload = build_realtime_session_payload(
+                    request=request,
+                    token=token,
+                    expires_at=expires_at,
+                    websocket_url=self.config.features.realtime_websocket_url.strip(),
+                    model=self.config.features.realtime_model.strip(),
+                    voice=self.config.features.realtime_voice.strip(),
+                    instructions=instructions,
+                )
+            except Exception as error:
+                self.ctx.logger.error(
+                    "Maimchat 实时会话授权失败 request=%s: %s",
+                    request["request_id"],
+                    error,
+                )
+                error_message = str(error)
+
+        if error_message:
+            response_payload = build_realtime_session_error_payload(
+                request_id=str(request["request_id"]),
+                message=error_message,
+            )
+
+        sent = await self.ctx.send.custom(
+            "realtime_session",
+            json.dumps(
+                response_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            stream_id,
+        )
+        self.ctx.logger.info(
+            "Maimchat 实时会话授权%s request=%s",
+            "已发送" if sent and not error_message else "失败",
+            request["request_id"],
+        )
         return bool(sent), "", 2
 
     @Command(

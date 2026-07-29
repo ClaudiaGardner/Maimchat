@@ -19,6 +19,17 @@ enum class CallRuntimePhase {
     }
 }
 
+/** Selects whether a call uses the classic ASR → MaiBot → TTS path or one realtime model. */
+enum class CallBackendMode {
+    CASCADE,
+    REALTIME;
+
+    companion object {
+        fun fromWireName(value: String?): CallBackendMode =
+                entries.firstOrNull { it.name.equals(value, ignoreCase = true) } ?: CASCADE
+    }
+}
+
 data class CallAudioPayload(
         val requestId: String,
         val turnId: String?,
@@ -40,6 +51,31 @@ data class CallTtsRequest(
         val replyMessageId: String,
         val text: String
 )
+
+data class RealtimeSessionRequest(
+        val requestId: String,
+        val nickname: String?,
+        val videoEnabled: Boolean
+)
+
+data class RealtimeSessionPayload(
+        val requestId: String,
+        val token: String?,
+        val expiresAt: Long?,
+        val websocketUrl: String?,
+        val model: String?,
+        val voice: String?,
+        val instructions: String?,
+        val error: String?
+) {
+    val isSuccess: Boolean
+        get() =
+                !token.isNullOrBlank() &&
+                        !websocketUrl.isNullOrBlank() &&
+                        !model.isNullOrBlank() &&
+                        !voice.isNullOrBlank() &&
+                        error.isNullOrBlank()
+}
 
 object CallInteractionCodec {
     private val gson = Gson()
@@ -72,6 +108,30 @@ object CallInteractionCodec {
                     }
                     .getOrNull()
 
+    fun parseRealtimeSession(raw: String): RealtimeSessionPayload? =
+            runCatching {
+                        val json = JsonParser.parseString(raw).asJsonObject
+                        val requestId =
+                                json.string("request_id").takeIf { it.isNotBlank() }
+                                        ?: return null
+                        RealtimeSessionPayload(
+                                requestId = requestId,
+                                token = json.string("token").ifBlank { null },
+                                expiresAt =
+                                        json.get("expires_at")
+                                                ?.takeUnless { it.isJsonNull }
+                                                ?.let { runCatching { it.asLong }.getOrNull() },
+                                websocketUrl =
+                                        json.string("websocket_url").ifBlank { null },
+                                model = json.string("model").ifBlank { null },
+                                voice = json.string("voice").ifBlank { null },
+                                instructions =
+                                        json.string("instructions").ifBlank { null },
+                                error = json.string("message").ifBlank { null }
+                        )
+                    }
+                    .getOrNull()
+
     fun encodeCommand(request: CallTtsRequest): String {
         val payload =
                 linkedMapOf(
@@ -85,6 +145,24 @@ object CallInteractionCodec {
         val json = gson.toJson(payload).toByteArray(Charsets.UTF_8)
         val encoded = Base64.encodeToString(json, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
         return "/maimchat call-tts $encoded"
+    }
+
+    fun encodeRealtimeSessionCommand(request: RealtimeSessionRequest): String {
+        val payload =
+                linkedMapOf(
+                        "version" to 1,
+                        "client" to "maimchat_android",
+                        "request_id" to request.requestId,
+                        "nickname" to request.nickname,
+                        "video_enabled" to request.videoEnabled
+                )
+        val json = gson.toJson(payload).toByteArray(Charsets.UTF_8)
+        val encoded =
+                Base64.encodeToString(
+                        json,
+                        Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+                )
+        return "/maimchat realtime-session $encoded"
     }
 
     private fun com.google.gson.JsonObject.string(name: String): String {

@@ -16,6 +16,7 @@ object ChatServiceProtocol {
     const val MSG_SET_SPEAKER_ENABLED = 12
     const val MSG_SEND_CALL_TURN = 13
     const val MSG_SET_CALL_MODE = 14
+    const val MSG_SEND_REALTIME_FRAME = 15
 
     // Service -> Client events
     const val MSG_EVENT_CONNECTION_STATE = 101
@@ -46,6 +47,9 @@ object ChatServiceProtocol {
     const val EXTRA_SPEAKER_ENABLED = "extra_speaker_enabled"
     const val EXTRA_CALL_ACTIVE = "extra_call_active"
     const val EXTRA_CALL_VIDEO_ENABLED = "extra_call_video_enabled"
+    const val EXTRA_CALL_BACKEND_MODE = "extra_call_backend_mode"
+    const val EXTRA_CALL_MICROPHONE_ENABLED = "extra_call_microphone_enabled"
+    const val EXTRA_REALTIME_FRAME_FILE_PATH = "extra_realtime_frame_file_path"
 
     // Event extras
     const val EXTRA_CONNECTION_STATE = "extra_connection_state"

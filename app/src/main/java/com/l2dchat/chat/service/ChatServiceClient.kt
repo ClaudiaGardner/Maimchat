@@ -14,6 +14,7 @@ import android.os.RemoteException
 import com.l2dchat.chat.AvatarIntent
 import com.l2dchat.chat.AvatarIntentCodec
 import com.l2dchat.chat.CallRuntimePhase
+import com.l2dchat.chat.CallBackendMode
 import com.l2dchat.chat.DeviceRequest
 import com.l2dchat.chat.DeviceRequestCodec
 import com.l2dchat.chat.MessageBase
@@ -284,7 +285,12 @@ class ChatServiceClient(context: Context) : ServiceConnection {
         )
     }
 
-    fun setCallMode(active: Boolean, videoEnabled: Boolean) {
+    fun setCallMode(
+            active: Boolean,
+            videoEnabled: Boolean,
+            backendMode: CallBackendMode = CallBackendMode.CASCADE,
+            microphoneEnabled: Boolean = true
+    ) {
         sendCommand(
                 ChatServiceProtocol.MSG_SET_CALL_MODE,
                 Bundle().apply {
@@ -292,6 +298,26 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                     putBoolean(
                             ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED,
                             active && videoEnabled
+                    )
+                    putString(
+                            ChatServiceProtocol.EXTRA_CALL_BACKEND_MODE,
+                            backendMode.name
+                    )
+                    putBoolean(
+                            ChatServiceProtocol.EXTRA_CALL_MICROPHONE_ENABLED,
+                            active && microphoneEnabled
+                    )
+                }
+        )
+    }
+
+    fun sendRealtimeFrame(file: File) {
+        sendCommand(
+                ChatServiceProtocol.MSG_SEND_REALTIME_FRAME,
+                Bundle().apply {
+                    putString(
+                            ChatServiceProtocol.EXTRA_REALTIME_FRAME_FILE_PATH,
+                            file.absolutePath
                     )
                 }
         )
@@ -453,6 +479,12 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                                         ChatServiceProtocol.EXTRA_CALL_VIDEO_ENABLED,
                                         false
                                 ),
+                        backendMode =
+                                CallBackendMode.fromWireName(
+                                        data.getString(
+                                                ChatServiceProtocol.EXTRA_CALL_BACKEND_MODE
+                                        )
+                                ),
                         phase =
                                 CallRuntimePhase.fromWireName(
                                         data.getString(ChatServiceProtocol.EXTRA_CALL_PHASE)
@@ -556,6 +588,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
                 ChatServiceProtocol.MSG_SEND_MEDIA -> "MSG_SEND_MEDIA"
                 ChatServiceProtocol.MSG_SET_SPEAKER_ENABLED -> "MSG_SET_SPEAKER_ENABLED"
                 ChatServiceProtocol.MSG_SET_CALL_MODE -> "MSG_SET_CALL_MODE"
+                ChatServiceProtocol.MSG_SEND_REALTIME_FRAME -> "MSG_SEND_REALTIME_FRAME"
                 ChatServiceProtocol.MSG_EVENT_CONNECTION_STATE -> "MSG_EVENT_CONNECTION_STATE"
                 ChatServiceProtocol.MSG_EVENT_NEW_MESSAGE -> "MSG_EVENT_NEW_MESSAGE"
                 ChatServiceProtocol.MSG_EVENT_SNAPSHOT -> "MSG_EVENT_SNAPSHOT"
@@ -580,6 +613,7 @@ class ChatServiceClient(context: Context) : ServiceConnection {
     data class CallRuntimeSnapshot(
             val active: Boolean = false,
             val videoEnabled: Boolean = false,
+            val backendMode: CallBackendMode = CallBackendMode.CASCADE,
             val phase: CallRuntimePhase = CallRuntimePhase.IDLE,
             val turnId: String? = null,
             val ttsRequestId: String? = null,

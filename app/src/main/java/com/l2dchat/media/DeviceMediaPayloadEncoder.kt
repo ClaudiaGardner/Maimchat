@@ -19,13 +19,22 @@ object DeviceMediaPayloadEncoder {
     fun encode(context: Context, type: String, path: String): String {
         val file = validatedPrivateFile(context, path)
         return when (type) {
-            "image" -> Base64.encodeToString(normalizeImage(file), Base64.NO_WRAP)
+            "image" ->
+                    Base64.encodeToString(
+                            normalizeImage(file, MAX_IMAGE_EDGE, 84),
+                            Base64.NO_WRAP
+                    )
             "voice" -> {
                 require(file.length() <= MAX_AUDIO_BYTES) { "录音超过 4 MB，请缩短录音时间" }
                 Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
             }
             else -> error("不支持的媒体类型：$type")
         }
+    }
+
+    fun encodeRealtimeImage(context: Context, path: String): ByteArray {
+        val file = validatedPrivateFile(context, path)
+        return normalizeImage(file, maxEdge = 768, jpegQuality = 72)
     }
 
     private fun validatedPrivateFile(context: Context, path: String): File {
@@ -38,13 +47,17 @@ object DeviceMediaPayloadEncoder {
         return file
     }
 
-    private fun normalizeImage(file: File): ByteArray {
+    private fun normalizeImage(
+            file: File,
+            maxEdge: Int,
+            jpegQuality: Int
+    ): ByteArray {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "无法识别拍摄的图片" }
         var sampleSize = 1
         while (max(bounds.outWidth / sampleSize, bounds.outHeight / sampleSize) >
-                        MAX_IMAGE_EDGE * 2
+                        maxEdge * 2
         ) {
             sampleSize *= 2
         }
@@ -73,8 +86,8 @@ object DeviceMediaPayloadEncoder {
         }
 
         val longestEdge = max(bitmap.width, bitmap.height)
-        if (longestEdge > MAX_IMAGE_EDGE) {
-            val ratio = MAX_IMAGE_EDGE.toFloat() / longestEdge
+        if (longestEdge > maxEdge) {
+            val ratio = maxEdge.toFloat() / longestEdge
             val scaled =
                     Bitmap.createScaledBitmap(
                             bitmap,
@@ -88,7 +101,9 @@ object DeviceMediaPayloadEncoder {
 
         return try {
             ByteArrayOutputStream().use { output ->
-                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 84, output)) { "图片压缩失败" }
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, output)) {
+                    "图片压缩失败"
+                }
                 output.toByteArray()
             }
         } finally {

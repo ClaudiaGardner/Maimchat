@@ -39,12 +39,14 @@ def configured_plugin(
         {
             "plugin": {
                 "enabled": True,
-                "config_version": "1.3.0",
+                "config_version": "1.4.0",
             },
             "features": {
                 "camera_requests_enabled": camera_enabled,
                 "call_tts_enabled": call_tts_enabled,
                 "call_tts_voice": "voice-test",
+                "realtime_enabled": True,
+                "realtime_voice": "Tina",
             }
         }
     )
@@ -72,6 +74,24 @@ def encode_call_request(
             "turn_id": turn_id,
             "reply_message_id": "reply-12345678",
             "text": text,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def encode_realtime_request(
+    *,
+    request_id: str = "realtime-12345678",
+    video_enabled: bool = True,
+) -> str:
+    raw = json.dumps(
+        {
+            "version": 1,
+            "client": "maimchat_android",
+            "request_id": request_id,
+            "nickname": "测试用户",
+            "video_enabled": video_enabled,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -163,6 +183,25 @@ class ProtocolBuilderTests(unittest.TestCase):
             self.assertEqual(wav_file.getsampwidth(), 2)
             self.assertEqual(wav_file.getframerate(), 24_000)
             self.assertEqual(wav_file.readframes(2), b"\x01\x00\xff\xff")
+
+    def test_realtime_request_is_correlated_and_validated(self) -> None:
+        request = plugin.decode_realtime_session_request(encode_realtime_request())
+
+        self.assertEqual(request["request_id"], "realtime-12345678")
+        self.assertEqual(request["nickname"], "测试用户")
+        self.assertTrue(request["video_enabled"])
+
+    def test_realtime_payload_requires_encrypted_websocket(self) -> None:
+        with self.assertRaises(RuntimeError):
+            plugin.build_realtime_session_payload(
+                request={"request_id": "realtime-12345678"},
+                token="st-test",
+                expires_at=123,
+                websocket_url="ws://example.test",
+                model="qwen-realtime",
+                voice="Tina",
+                instructions="test",
+            )
 
 
 class PluginToolTests(unittest.IsolatedAsyncioTestCase):
@@ -257,6 +296,45 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(custom_type, "call_state")
         self.assertEqual(payload["phase"], "error")
         self.assertEqual(payload["request_id"], "tts-12345678")
+
+    async def test_realtime_session_returns_short_lived_credential_to_android(self) -> None:
+        instance, sender = configured_plugin()
+
+        with (
+            patch.object(plugin, "_load_provider_api_key", return_value="permanent-test-key"),
+            patch.object(plugin, "_load_realtime_persona", return_value="你是测试角色"),
+            patch.object(
+                plugin,
+                "_create_temporary_api_key",
+                new=AsyncMock(return_value=("st-short-lived", 2_000_000_000)),
+            ),
+        ):
+            result = await instance.handle_realtime_session(
+                stream_id="stream-realtime",
+                platform="maimchat_android",
+                matched_groups={"payload": encode_realtime_request()},
+            )
+
+        self.assertEqual(result, (True, "", 2))
+        custom_type, data, stream_id = sender.calls[0]
+        payload = json.loads(data)
+        self.assertEqual(custom_type, "realtime_session")
+        self.assertEqual(stream_id, "stream-realtime")
+        self.assertEqual(payload["token"], "st-short-lived")
+        self.assertEqual(payload["model"], "qwen3.5-omni-flash-realtime")
+        self.assertEqual(payload["voice"], "Tina")
+
+    async def test_realtime_session_rejects_non_android_platform(self) -> None:
+        instance, sender = configured_plugin()
+
+        result = await instance.handle_realtime_session(
+            stream_id="stream-realtime",
+            platform="qq",
+            matched_groups={"payload": encode_realtime_request()},
+        )
+
+        self.assertEqual(result, (False, "", 2))
+        self.assertEqual(sender.calls, [])
 
 
 if __name__ == "__main__":

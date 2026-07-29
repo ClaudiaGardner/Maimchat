@@ -21,6 +21,7 @@ tcmofashi: 本项目纯纯的vibe coding，还请见谅
 - **标准化 WebSocket 协议**：对接新的 `sender_info` / `receiver_info` 消息格式，可发送文本、表情、语音段，支持 Platform Header 与 Bearer Token。
 - **结构化形象驱动**：兼容 Amaidesu 风格的 `speech / emotion / action(parameters)` 意图，按当前模型已有资源匹配表情和动作；播放 MaiBot 语音时自动驱动 Live2D 口型。
 - **免按键语音轮次**：可从“更多操作”开启常驻收音，Android 端使用轻量自适应 VAD 自动识别人声起止并发送 WAV；断线或角色扬声器播放时自动暂停，避免空消息和声音回录。
+- **可选端到端实时通话**：可在“更多操作”中切换到 Qwen Omni Realtime。设备直接流式发送麦克风 PCM、接收扬声器 PCM，支持语义 VAD、回声消除和插话打断；视频模式按 1 fps 提交压缩摄像头关键帧。授权或模型连接失败时自动回退到原有 ASR → MaiBot → TTS 链路。
 - **按需视觉输入**：用户明确授权后，MaiBot 可用带 `request_id` 的 `device_request` 请求一次前置或后置摄像头快照；默认关闭，不持续录像，回传图片可与原请求关联。
 - **MaiBot 1.x 原生插件**：仓库内附 `@Tool` 插件，MaiBot 可直接向当前 Android 会话发送形象意图和按需拍照请求，不需要 Unity 或额外运行独立 Adapter。
 - **桌面扩展能力**：提供动态壁纸 `Live2DWallpaperService` 以及桌面小组件 `Live2DChatWidgetProvider` 骨架，演示消息气泡同步、手势交互。

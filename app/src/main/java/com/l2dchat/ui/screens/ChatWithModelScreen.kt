@@ -65,6 +65,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import com.l2dchat.chat.CallRuntimePhase
+import com.l2dchat.chat.CallBackendMode
 import com.l2dchat.chat.DeviceRequest
 import com.l2dchat.chat.MessageBase
 import com.l2dchat.chat.service.ChatServiceClient
@@ -107,6 +108,7 @@ private val LandscapeReservedBottomHeight = 64.dp
 private val TopBarHeight = 56.dp
 private const val PREF_HANDS_FREE_VOICE = "hands_free_voice_enabled"
 private const val PREF_REMOTE_CAMERA = "remote_camera_enabled"
+private const val PREF_CALL_BACKEND = "call_backend_mode"
 
 private data class ConnectionErrorBanner(val id: Long, val message: String)
 
@@ -190,6 +192,17 @@ fun ChatWithModelScreen(
     var handsFreeVoiceEnabled by
             rememberSaveable {
                 mutableStateOf(prefs.getBoolean(PREF_HANDS_FREE_VOICE, false))
+            }
+    var callBackendMode by
+            rememberSaveable {
+                mutableStateOf(
+                        CallBackendMode.fromWireName(
+                                prefs.getString(
+                                        PREF_CALL_BACKEND,
+                                        CallBackendMode.CASCADE.name
+                                )
+                        )
+                )
             }
     var handsFreeVoiceState by
             remember { mutableStateOf(DeviceVoiceActivityRecorder.State.STOPPED) }
@@ -483,15 +496,28 @@ fun ChatWithModelScreen(
                                     CallRuntimePhase.SPEAKING
                             )
 
-    LaunchedEffect(automaticVoiceEnabled, showVideoCall) {
+    LaunchedEffect(
+            automaticVoiceEnabled,
+            showVideoCall,
+            callBackendMode,
+            videoCallMicrophoneMuted
+    ) {
         chatManager.setCallMode(
                 active = automaticVoiceEnabled,
-                videoEnabled = automaticVoiceEnabled && showVideoCall
+                videoEnabled = automaticVoiceEnabled && showVideoCall,
+                backendMode = callBackendMode,
+                microphoneEnabled =
+                        automaticVoiceEnabled &&
+                                (!showVideoCall || !videoCallMicrophoneMuted)
         )
     }
 
-    LaunchedEffect(automaticVoiceEnabled) {
-        if (automaticVoiceEnabled) {
+    val cascadeRecorderEnabled =
+            automaticVoiceEnabled &&
+                    callRuntimeState.backendMode == CallBackendMode.CASCADE
+
+    LaunchedEffect(cascadeRecorderEnabled) {
+        if (cascadeRecorderEnabled) {
             val result = withContext(Dispatchers.IO) { voiceActivityRecorder.start() }
             result.onSuccess {
                 voiceActivityRecorder.setPaused(
@@ -533,7 +559,7 @@ fun ChatWithModelScreen(
             showCameraCapture,
             isRecording
     ) {
-        if (automaticVoiceEnabled && voiceActivityRecorder.isRunning) {
+        if (cascadeRecorderEnabled && voiceActivityRecorder.isRunning) {
             voiceActivityRecorder.setPaused(
                     isSpeaking ||
                             botBusy ||
@@ -542,6 +568,35 @@ fun ChatWithModelScreen(
                             isRecording ||
                             connectionState != ChatServiceClient.ChatConnectionState.CONNECTED
             )
+        }
+    }
+
+    LaunchedEffect(
+            showVideoCall,
+            callBackendMode,
+            callRuntimeState.backendMode,
+            callRuntimeState.active
+    ) {
+        if (!showVideoCall ||
+                        callBackendMode != CallBackendMode.REALTIME ||
+                        callRuntimeState.backendMode != CallBackendMode.REALTIME ||
+                        !callRuntimeState.active
+        ) {
+            return@LaunchedEffect
+        }
+        // Qwen Omni Realtime recommends one extracted frame per second for video input.
+        while (true) {
+            videoCallCameraController.capture(
+                    onCaptured = { file -> chatManager.sendRealtimeFrame(file) },
+                    onError = { error ->
+                        uiLogger.debug(
+                                message = "实时视频帧暂不可用：$error",
+                                throttleMs = 5_000L,
+                                throttleKey = "realtime_video_frame"
+                        )
+                    }
+            )
+            delay(1_000)
         }
     }
 
@@ -855,6 +910,8 @@ fun ChatWithModelScreen(
                 callRuntimeState.phase == CallRuntimePhase.SPEAKING || isSpeaking -> "正在回应"
                 callRuntimeState.phase == CallRuntimePhase.ERROR ->
                         callRuntimeState.detail ?: "这次对话出了点问题"
+                callRuntimeState.backendMode == CallBackendMode.REALTIME ->
+                        "端到端 · 正在聆听"
                 handsFreeVoiceState == DeviceVoiceActivityRecorder.State.PAUSED ->
                         "收音已暂停"
                 else -> "正在聆听"
@@ -1071,6 +1128,53 @@ fun ChatWithModelScreen(
                                                             Manifest.permission.RECORD_AUDIO
                                                     )
                                                 }
+                                            }
+                                    )
+                                    DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(
+                                                            if (callBackendMode ==
+                                                                            CallBackendMode
+                                                                                    .REALTIME
+                                                            ) {
+                                                                "通话后端：端到端实时"
+                                                            } else {
+                                                                "通话后端：串联模式"
+                                                            }
+                                                    )
+                                                    Text(
+                                                            if (callBackendMode ==
+                                                                            CallBackendMode
+                                                                                    .REALTIME
+                                                            ) {
+                                                                "低延迟流式语音，可随时打断"
+                                                            } else {
+                                                                "ASR → MaiBot → TTS"
+                                                            },
+                                                            style =
+                                                                    MaterialTheme.typography
+                                                                            .bodySmall
+                                                    )
+                                                }
+                                            },
+                                            onClick = {
+                                                overflowExpanded = false
+                                                callBackendMode =
+                                                        if (callBackendMode ==
+                                                                        CallBackendMode.REALTIME
+                                                        ) {
+                                                            CallBackendMode.CASCADE
+                                                        } else {
+                                                            CallBackendMode.REALTIME
+                                                        }
+                                                prefs.edit()
+                                                        .putString(
+                                                                PREF_CALL_BACKEND,
+                                                                callBackendMode.name
+                                                        )
+                                                        .apply()
+                                                revealControls()
                                             }
                                     )
                                     DropdownMenuItem(

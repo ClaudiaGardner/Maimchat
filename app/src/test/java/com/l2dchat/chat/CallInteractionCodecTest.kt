@@ -1,7 +1,9 @@
 package com.l2dchat.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CallInteractionCodecTest {
@@ -86,5 +88,73 @@ class CallInteractionCodecTest {
         require(result is Live2DChatMessageHandler.ChatMessageResult.CallStateProcessed)
         assertEquals("tts-12345678", result.payload.requestId)
         assertEquals(CallRuntimePhase.ERROR, result.payload.phase)
+    }
+
+    @Test
+    fun parsesShortLivedRealtimeSession() {
+        val payload =
+                CallInteractionCodec.parseRealtimeSession(
+                        """
+                        {
+                          "version": 1,
+                          "request_id": "realtime-12345678",
+                          "token": "st-short-lived",
+                          "expires_at": 2000000000,
+                          "websocket_url": "wss://example.test/realtime",
+                          "model": "qwen3.5-omni-flash-realtime",
+                          "voice": "Tina",
+                          "instructions": "你是实时角色"
+                        }
+                        """.trimIndent()
+                )
+
+        requireNotNull(payload)
+        assertTrue(payload.isSuccess)
+        assertEquals("st-short-lived", payload.token)
+        assertEquals(2_000_000_000L, payload.expiresAt)
+        assertEquals("qwen3.5-omni-flash-realtime", payload.model)
+    }
+
+    @Test
+    fun parsesRealtimeAuthorizationFailure() {
+        val payload =
+                CallInteractionCodec.parseRealtimeSession(
+                        """
+                        {
+                          "version": 1,
+                          "request_id": "realtime-12345678",
+                          "phase": "error",
+                          "message": "model access denied"
+                        }
+                        """.trimIndent()
+                )
+
+        requireNotNull(payload)
+        assertFalse(payload.isSuccess)
+        assertEquals("model access denied", payload.error)
+    }
+
+    @Test
+    fun realtimeCredentialIsRedactedBeforeHistoryPersistence() {
+        val message =
+                MessageBase.fromJsonString(
+                        """
+                        {
+                          "message_info": {
+                            "platform": "maimchat_android",
+                            "message_id": "realtime-session-1",
+                            "time": 1
+                          },
+                          "message_segment": {
+                            "type": "realtime_session",
+                            "data": "{\"request_id\":\"realtime-12345678\",\"token\":\"st-secret\"}"
+                          }
+                        }
+                        """.trimIndent()
+                )
+
+        val persisted = message.redactedForHistory().toJsonString()
+        assertFalse(persisted.contains("st-secret"))
+        assertTrue(persisted.contains("media payload omitted"))
     }
 }
