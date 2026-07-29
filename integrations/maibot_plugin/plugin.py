@@ -7,15 +7,22 @@ Live2D model, so this plugin does not depend on model assets or Unity.
 
 import asyncio
 import base64
+import io
 import json
 import re
-import urllib.error
-import urllib.request
+import tomllib
+import wave
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from aiohttp import ClientSession, ClientTimeout, ClientWSTimeout, WSMsgType
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
+
+
+DEFAULT_TTS_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+DEFAULT_TTS_MODEL = "qwen3-tts-vc-realtime-2026-01-15"
 
 
 EMOTIONS = [
@@ -42,7 +49,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 Maimchat 设备控制")
-    config_version: str = Field(default="1.2.0", description="配置版本")
+    config_version: str = Field(default="1.3.0", description="配置版本")
 
 
 class FeatureConfig(PluginConfigBase):
@@ -64,21 +71,39 @@ class FeatureConfig(PluginConfigBase):
     )
     call_tts_enabled: bool = Field(
         default=True,
-        description="允许视频通话回复通过兼容的 HTTP TTS 服务生成语音",
+        description="允许通话回复直接调用云端 TTS API 生成语音",
     )
-    call_tts_endpoint: str = Field(
-        default="http://127.0.0.1:9881/v1/synthesize",
-        description="返回 WAV 音频的 HTTP TTS 接口",
+    call_tts_provider_name: str = Field(
+        default="AlibabaDashScope",
+        description="从 MaiBot model_config.toml 读取 API Key 的供应商名称",
+    )
+    call_tts_provider_config_path: str = Field(
+        default="config/model_config.toml",
+        description="MaiBot 模型供应商配置文件；相对路径从 MaiBot 根目录解析",
+    )
+    call_tts_websocket_url: str = Field(
+        default=DEFAULT_TTS_WEBSOCKET_URL,
+        description="云端实时 TTS WebSocket 地址，不包含 model 查询参数",
+    )
+    call_tts_model: str = Field(
+        default=DEFAULT_TTS_MODEL,
+        description="云端实时 TTS 模型名称",
     )
     call_tts_voice: str = Field(
         default="",
-        description="TTS 音色名称；留空时使用服务端默认音色",
+        description="云端音色或复刻音色 ID",
+    )
+    call_tts_speech_rate: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=2.0,
+        description="云端 TTS 语速倍率",
     )
     call_tts_timeout_seconds: float = Field(
-        default=180.0,
+        default=45.0,
         ge=5.0,
         le=300.0,
-        description="等待 TTS 生成完成的最长秒数",
+        description="等待云端 TTS 完成的最长秒数",
     )
 
 
@@ -236,38 +261,144 @@ def build_call_error_payload(
     }
 
 
-def _synthesize_voice(
+def _resolve_provider_config_path(value: str) -> Path:
+    configured = Path(value).expanduser()
+    candidates = [configured]
+    if not configured.is_absolute():
+        candidates = [
+            Path.cwd() / configured,
+            Path(__file__).resolve().parents[2] / configured,
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"找不到 MaiBot 模型供应商配置: {value}")
+
+
+def _load_provider_api_key(*, config_path: str, provider_name: str) -> str:
+    """Read an existing MaiBot provider key without duplicating it in plugin config."""
+
+    path = _resolve_provider_config_path(config_path)
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeError(f"无法读取 MaiBot 模型供应商配置: {error}") from error
+    provider = next(
+        (
+            item
+            for item in config.get("api_providers", [])
+            if isinstance(item, dict) and str(item.get("name") or "") == provider_name
+        ),
+        None,
+    )
+    if provider is None:
+        raise RuntimeError(f"未配置 TTS API 供应商: {provider_name}")
+    api_key = str(provider.get("api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError(f"TTS API 供应商 {provider_name} 的 API Key 为空")
+    return api_key
+
+
+def _pcm16_to_wav(pcm: bytes, sample_rate: int = 24_000) -> bytes:
+    if not pcm:
+        raise RuntimeError("云端 TTS 返回了空音频")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+    return output.getvalue()
+
+
+def _tts_event(event_type: str, **payload: object) -> dict[str, object]:
+    return {
+        "event_id": f"event_{uuid4().hex}",
+        "type": event_type,
+        **payload,
+    }
+
+
+async def _synthesize_voice(
     *,
-    endpoint: str,
+    api_key: str,
+    websocket_url: str,
+    model: str,
     text: str,
     voice: str,
+    speech_rate: float,
     timeout_seconds: float,
 ) -> bytes:
-    """Call a compatible HTTP TTS service and return its audio response."""
+    """Call the cloud realtime TTS WebSocket directly and return a WAV response."""
 
-    payload: dict[str, str] = {"text": text, "language": "Chinese"}
-    if voice:
-        payload["voice"] = voice
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            audio = response.read()
-            content_type = str(response.headers.get("Content-Type", "")).lower()
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"TTS HTTP {error.code}: {body[:240]}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"无法连接 TTS 服务: {error.reason}") from error
-    if not audio:
-        raise RuntimeError("TTS 服务返回了空音频")
-    if content_type and "audio" not in content_type and "octet-stream" not in content_type:
-        raise RuntimeError(f"TTS 服务返回了非音频内容: {content_type}")
-    return audio
+    if not api_key:
+        raise RuntimeError("云端 TTS API Key 为空")
+    if not websocket_url or not model or not voice:
+        raise RuntimeError("云端 TTS 地址、模型或音色未配置")
+    separator = "&" if "?" in websocket_url else "?"
+    url = f"{websocket_url}{separator}model={model}"
+    pcm = bytearray()
+    timeout = ClientTimeout(total=timeout_seconds)
+    ws_timeout = ClientWSTimeout(ws_receive=timeout_seconds, ws_close=5)
+
+    async with ClientSession(timeout=timeout) as session:
+        async with session.ws_connect(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": "maimchat-android-device/1.0",
+            },
+            timeout=ws_timeout,
+            heartbeat=20,
+        ) as websocket:
+            async for message in websocket:
+                if message.type == WSMsgType.TEXT:
+                    payload = json.loads(message.data)
+                    event_type = str(payload.get("type") or "")
+                    if event_type == "session.created":
+                        await websocket.send_json(
+                            _tts_event(
+                                "session.update",
+                                session={
+                                    "voice": voice,
+                                    "mode": "commit",
+                                    "language_type": "Chinese",
+                                    "response_format": "pcm",
+                                    "sample_rate": 24_000,
+                                    "volume": 100,
+                                    "speech_rate": speech_rate,
+                                },
+                            )
+                        )
+                    elif event_type == "session.updated":
+                        await websocket.send_json(
+                            _tts_event("input_text_buffer.append", text=text)
+                        )
+                        await websocket.send_json(_tts_event("input_text_buffer.commit"))
+                    elif event_type == "response.audio.delta":
+                        encoded_audio = str(payload.get("delta") or "")
+                        if encoded_audio:
+                            pcm.extend(base64.b64decode(encoded_audio, validate=True))
+                            if len(pcm) > 24_000 * 2 * 120:
+                                raise RuntimeError("云端 TTS 音频超过两分钟限制")
+                    elif event_type == "response.done":
+                        await websocket.send_json(_tts_event("session.finish"))
+                    elif event_type == "session.finished":
+                        break
+                    elif event_type == "error":
+                        error = payload.get("error", payload)
+                        raise RuntimeError(
+                            "云端 TTS 返回错误: "
+                            + json.dumps(error, ensure_ascii=False)[:480]
+                        )
+                elif message.type in {
+                    WSMsgType.CLOSE,
+                    WSMsgType.CLOSED,
+                    WSMsgType.ERROR,
+                }:
+                    raise RuntimeError(f"云端 TTS WebSocket 异常关闭: {message.type}")
+
+    return _pcm16_to_wav(bytes(pcm))
 
 
 class MaimchatDevicePlugin(MaiBotPlugin):
@@ -459,8 +590,8 @@ class MaimchatDevicePlugin(MaiBotPlugin):
             error_message = "Maimchat 设备插件已禁用"
         elif not self.config.features.call_tts_enabled:
             error_message = "Maimchat 通话语音输出已禁用"
-        elif not self.config.features.call_tts_endpoint.strip():
-            error_message = "尚未配置 Maimchat 通话 TTS 接口"
+        elif not self.config.features.call_tts_voice.strip():
+            error_message = "尚未配置云端 TTS 音色 ID"
         else:
             error_message = ""
 
@@ -482,11 +613,18 @@ class MaimchatDevicePlugin(MaiBotPlugin):
             return True, "", 2
 
         try:
-            audio = await asyncio.to_thread(
-                _synthesize_voice,
-                endpoint=self.config.features.call_tts_endpoint.strip(),
+            api_key = await asyncio.to_thread(
+                _load_provider_api_key,
+                config_path=self.config.features.call_tts_provider_config_path.strip(),
+                provider_name=self.config.features.call_tts_provider_name.strip(),
+            )
+            audio = await _synthesize_voice(
+                api_key=api_key,
+                websocket_url=self.config.features.call_tts_websocket_url.strip(),
+                model=self.config.features.call_tts_model.strip(),
                 text=request["text"],
                 voice=self.config.features.call_tts_voice.strip(),
+                speech_rate=self.config.features.call_tts_speech_rate,
                 timeout_seconds=self.config.features.call_tts_timeout_seconds,
             )
         except Exception as error:

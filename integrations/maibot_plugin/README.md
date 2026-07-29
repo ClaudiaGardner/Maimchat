@@ -20,14 +20,21 @@ Android 的视频通话模式会把一段自动分轮的语音和当前摄像头
 系统 TTS，确保每轮有可听回复。`maimchat_speak` 不再作为全局 LLM 工具注册，
 因此不会误影响 QQ 通话或其他平台。
 
-TTS 接口默认是 `http://127.0.0.1:9881/v1/synthesize`，应接受 JSON
-`{"text":"...","language":"Chinese"}` 并直接返回 WAV；地址、音色和超时都可在
-插件配置的“设备能力”中修改。
+插件不会启动或依赖本地 TTS/STT 服务。TTS 由插件直接连接阿里云实时 TTS
+WebSocket，流式接收 PCM 后封装成 WAV 发给 Android；API Key 从 MaiBot 已有的
+`config/model_config.toml` 供应商配置读取，不写入 APK 或插件仓库。音色 ID、
+模型、WebSocket 地址、语速和超时可在插件配置的“设备能力”中修改。
+
+设备录制的语音仍通过标准 `voice` 消息段交给 MaiBot。STT 应在 MaiBot 的
+`model_task_config.voice` 中只配置云端 ASR 模型，例如阿里
+`qwen3-asr-flash`；不要把本地 SenseVoice 等模型列为兜底。这样 TTS 与 STT 都是
+直接 API 调用，H20 不需要额外运行 9881、ASR 或 TTS 服务。
 
 ## 版本要求
 
 - MaiBot `1.0.0` 到 `1.x`
 - `maibot-plugin-sdk >= 2.5.4`
+- MaiBot 运行环境中的 `aiohttp`（MaiBot 1.x 已包含）
 - 支持 `avatar_intent`、`device_request`、`call_audio` 和 `call_state` 的
   Maimchat Android 版本
 

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import re
 import sys
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+import wave
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -37,11 +39,12 @@ def configured_plugin(
         {
             "plugin": {
                 "enabled": True,
-                "config_version": "1.2.0",
+                "config_version": "1.3.0",
             },
             "features": {
                 "camera_requests_enabled": camera_enabled,
                 "call_tts_enabled": call_tts_enabled,
+                "call_tts_voice": "voice-test",
             }
         }
     )
@@ -76,6 +79,16 @@ def encode_call_request(
 
 
 class ProtocolBuilderTests(unittest.TestCase):
+    def test_legacy_http_timeout_survives_cloud_config_migration(self) -> None:
+        config = plugin.MaimchatDevicePluginConfig.model_validate(
+            {
+                "plugin": {"enabled": True, "config_version": "1.2.0"},
+                "features": {"call_tts_timeout_seconds": 180.0},
+            }
+        )
+
+        self.assertEqual(config.features.call_tts_timeout_seconds, 180.0)
+
     def test_avatar_payload_is_renderer_neutral_and_clamped(self) -> None:
         payload = plugin.build_avatar_payload(
             emotion=" happy ",
@@ -142,6 +155,15 @@ class ProtocolBuilderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plugin.decode_call_tts_request(encoded)
 
+    def test_pcm16_is_wrapped_as_playable_wav(self) -> None:
+        wav = plugin._pcm16_to_wav(b"\x01\x00\xff\xff", sample_rate=24_000)
+
+        with wave.open(io.BytesIO(wav), "rb") as wav_file:
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertEqual(wav_file.getframerate(), 24_000)
+            self.assertEqual(wav_file.readframes(2), b"\x01\x00\xff\xff")
+
 
 class PluginToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_avatar_tool_sends_custom_segment_to_current_stream(self) -> None:
@@ -191,7 +213,14 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_call_tts_command_returns_correlated_audio(self) -> None:
         instance, sender = configured_plugin()
 
-        with patch.object(plugin, "_synthesize_voice", return_value=b"RIFF-call-wav"):
+        with (
+            patch.object(plugin, "_load_provider_api_key", return_value="test-key"),
+            patch.object(
+                plugin,
+                "_synthesize_voice",
+                new=AsyncMock(return_value=b"RIFF-call-wav"),
+            ),
+        ):
             result = await instance.handle_call_tts(
                 stream_id="stream-call",
                 matched_groups={"payload": encode_call_request()},
@@ -209,10 +238,13 @@ class PluginToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_call_tts_failure_requests_android_fallback(self) -> None:
         instance, sender = configured_plugin()
 
-        with patch.object(
-            plugin,
-            "_synthesize_voice",
-            side_effect=RuntimeError("tts unavailable"),
+        with (
+            patch.object(plugin, "_load_provider_api_key", return_value="test-key"),
+            patch.object(
+                plugin,
+                "_synthesize_voice",
+                new=AsyncMock(side_effect=RuntimeError("tts unavailable")),
+            ),
         ):
             result = await instance.handle_call_tts(
                 stream_id="stream-call",
