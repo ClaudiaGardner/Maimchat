@@ -64,7 +64,7 @@ class CallInteractionCodecTest {
                         """
                         {
                           "message_info": {
-                            "platform": "kaisy_android",
+                            "platform": "android_device",
                             "message_id": "call-state-1",
                             "time": 1
                           },
